@@ -1,0 +1,32 @@
+{
+  "name": "idlehands",
+  "version": "0.1.0",
+  "description": "Spatial visualization for Cursor agent telemetry",
+  "type": "module",
+  "main": "dist/server/index.js",
+  "bin": {
+    "idlehands": "./dist/cli/index.js",
+    "idlehands-hook": "./dist/hook/runner.js",
+    "idlehands-log": "./dist/cli/log.js"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-ui.mjs",
+    "dev": "tsc --watch",
+    "start": "node dist/server/index.js",
+    "install-hooks": "node dist/cli/index.js install",
+    "uninstall-hooks": "node dist/cli/index.js uninstall",
+    "doctor": "node dist/cli/index.js doctor",
+    "log": "node dist/cli/log.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.0"
+  }
+}

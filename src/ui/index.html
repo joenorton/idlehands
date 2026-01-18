@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Idlehands - Agent Telemetry Visualization</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #canvas {
+      flex: 1;
+      background: #0a0a0f;
+      background-image: 
+        radial-gradient(circle at 20% 50%, rgba(100, 150, 255, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(139, 92, 246, 0.03) 0%, transparent 50%);
+      cursor: crosshair;
+    }
+
+    #timeline {
+      height: 120px;
+      background: #151515;
+      border-top: 1px solid #333;
+      position: relative;
+    }
+
+    #controls {
+      padding: 8px 16px;
+      background: #151515;
+      border-bottom: 1px solid #333;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      font-size: 12px;
+    }
+
+    #status {
+      color: #888;
+      flex: 1;
+    }
+
+    #statusPanel {
+      display: flex;
+      gap: 16px;
+      font-size: 11px;
+      color: #aaa;
+    }
+
+    #statusPanel .stat {
+      display: flex;
+      gap: 4px;
+    }
+
+    #statusPanel .stat-label {
+      color: #666;
+    }
+
+    #statusPanel .stat-value {
+      color: #ccc;
+      font-weight: 500;
+    }
+
+
+    button {
+      background: #2a2a2a;
+      border: 1px solid #444;
+      color: #e0e0e0;
+      padding: 4px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    button:hover {
+      background: #333;
+    }
+
+    .mode-active {
+      background: #4a4a4a;
+    }
+
+    #banner {
+      padding: 12px 16px;
+      background: #151515;
+      border-bottom: 1px solid #333;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    #banner-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #e0e0e0;
+      letter-spacing: 0.5px;
+    }
+
+    #banner-credit {
+      font-size: 11px;
+      color: #666;
+    }
+
+    #banner-credit a {
+      color: #666;
+      text-decoration: none;
+      margin-left: 8px;
+    }
+
+    #banner-credit a:hover {
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <div id="banner">
+    <div id="banner-title">idlehands</div>
+    <div id="banner-credit">Agent telemetry visualization <a href="https://github.com/joenorton/idlehands" target="_blank">GitHub</a></div>
+  </div>
+  <div id="controls">
+    <span id="status">Connecting...</span>
+    <div id="statusPanel">
+      <div class="stat">
+        <span class="stat-label">Last:</span>
+        <span class="stat-value" id="lastEvent">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Rate:</span>
+        <span class="stat-value" id="eventsPerSec">0</span>
+        <span class="stat-label">ev/s</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Idle:</span>
+        <span class="stat-value" id="idleSeconds">0</span>
+        <span class="stat-label">s</span>
+      </div>
+    </div>
+    <button id="loadMoreEvents" style="display: none;">Load More Events</button>
+  </div>
+  <div id="mainContainer" style="display: flex; flex: 1; overflow: hidden;">
+    <div id="activityLog" style="flex: 0 0 50%; overflow-y: auto; overflow-x: hidden;"></div>
+    <div id="canvasContainer" style="flex: 0 0 50%; position: relative;">
+      <canvas id="canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+    </div>
+  </div>
+  <div id="timeline"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
