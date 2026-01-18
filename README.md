@@ -6,6 +6,46 @@ Idlehands makes AI agent behavior observable by showing activity modes, transiti
 
 ![Idlehands Screenshot](marketing/idlehands-scrnshot.jpg)
 
+## Quick Start
+
+1. **Clone and build**:
+   ```bash
+   git clone <repo-url>
+   cd idlehands
+   npm install
+   npm run build
+   ```
+
+2. **Install Cursor hooks**:
+   ```bash
+   node dist/cli/index.js install
+   ```
+   
+   This creates/updates `.cursor/hooks.json` in your repository root.
+
+3. **Restart Cursor** for hooks to take effect.
+
+4. **Start the server**:
+   ```bash
+   npm start
+   ```
+   
+   The server runs on `http://localhost:8765` by default.
+
+5. **Open in your browser**:
+   
+   Navigate to `http://localhost:8765` to view the visualization. The UI will:
+   - Load the layout (zone anchors)
+   - Connect via WebSocket for real-time events
+   - Display the activity log (left) and agent movement between zone anchors (right)
+
+### CLI Commands
+
+- `node dist/cli/index.js install` - Install Cursor hooks
+- `node dist/cli/index.js uninstall` - Remove Cursor hooks
+- `node dist/cli/index.js doctor` - Check system health
+- `node dist/cli/log.js` - Generate demo events for testing
+
 ## Features
 
 - **Activity Log Table**: Primary view showing time-ordered events with explicit mode labels (READ, WRITE, EXECUTING, THOUGHT_COMPLETE, RESPONSE_COMPLETE), timestamps, and concrete evidence (file paths, commands, tool names)
@@ -89,50 +129,7 @@ The layout uses a simple activity-first, temporal system. All visual emphasis de
   - `CharacterModel`: Loads and manages sprite assets, handles animation frame advancement for activity loops (reading, writing, executing), and provides current sprite for rendering
   - `Timeline`: Live event timeline indicator (v0: no replay/scrubbing)
 
-## Installation
-
-1. **Clone and build**:
-   ```bash
-   git clone <repo-url>
-   cd idlehands
-   npm install
-   npm run build
-   ```
-
-2. **Install Cursor hooks**:
-   ```bash
-   node dist/cli/index.js install
-   ```
-   
-   This creates/updates `.cursor/hooks.json` in your repository root.
-
-3. **Restart Cursor** for hooks to take effect.
-
-## Usage
-
-### Starting the Server
-
-```bash
-npm start
-```
-
-The server runs on `http://localhost:8765` by default.
-
-### Viewing the Visualization
-
-Open `http://localhost:8765` in your browser. The UI will:
-- Load the layout (zone anchors)
-- Connect via WebSocket for real-time events
-- Display the activity log (left) and agent movement between zone anchors (right)
-
-### CLI Commands
-
-- `node dist/cli/index.js install` - Install Cursor hooks
-- `node dist/cli/index.js uninstall` - Remove Cursor hooks
-- `node dist/cli/index.js doctor` - Check system health
-- `node dist/cli/log.js` - Generate demo events for testing
-
-### UI Controls
+## UI Controls
 
 - **Activity Log**: Scrollable table showing all events in time order (newest first)
 - **Status Panel**: Shows current activity mode, dwell time, events per second, and idle time
