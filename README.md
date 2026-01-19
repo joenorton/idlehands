@@ -95,7 +95,7 @@ The layout uses a simple activity-first, temporal system. All visual emphasis de
 │   Cursor    │
 │    IDE      │
 └──────┬──────┘
-       │ Hooks (afterFileEdit, beforeReadFile, etc.)
+       │ Hooks (afterFileEdit, beforeReadFile, beforeMCPExecution, etc.)
        ▼
 ┌─────────────┐
 │ Hook Runner │  ──►  ~/.idlehands/events.ndjson

@@ -147,6 +147,8 @@ export function install() {
     'beforeReadFile',       // File reads
     'beforeShellExecution', // Terminal commands (before)
     'afterShellExecution',  // Terminal commands (after)
+    'beforeMCPExecution',  // MCP tool calls (before)
+    'afterMCPExecution',    // MCP tool calls (after)
     'afterAgentResponse',  // Agent responses
     'afterAgentThought',   // Agent thoughts
     'stop',                // Session end

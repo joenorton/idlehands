@@ -161,12 +161,26 @@ class App {
         }
       }
       
-      // Check if the last event (most recent) was a session stop
-      const lastEvent = events.length > 0 ? events[events.length - 1] : null;
-      const isSessionEnded = lastEvent?.type === 'session' && (lastEvent as SessionEvent).state === 'stop';
-      this.isSessionEnded = isSessionEnded;
+      // Check the most recent session event to determine session state
+      // Events are in reverse chronological order (newest first)
+      let sessionEnded = false;
+      if (events.length > 0) {
+        // Find the most recent session event
+        for (const event of events) {
+          if (event.type === 'session') {
+            const se = event as SessionEvent;
+            sessionEnded = se.state === 'stop';
+            break; // Found most recent session event, use its state
+          }
+        }
+        // If no session event found but we have events, assume session is active
+      } else {
+        // No events at all - treat as ended
+        sessionEnded = true;
+      }
+      this.isSessionEnded = sessionEnded;
       
-      if (isSessionEnded || events.length === 0) {
+      if (this.isSessionEnded || events.length === 0) {
         // Session has ended or no events - agent should be at home
         this.agentController.setActiveFile(null);
         this.agentController.moveToHome(true);

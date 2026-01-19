@@ -46,6 +46,8 @@ We're using these hook trigger names (verified with Cursor):
 - `beforeReadFile` - for file reads
 - `beforeShellExecution` - for terminal/command execution (before)
 - `afterShellExecution` - for terminal/command execution (after)
+- `beforeMCPExecution` - for MCP tool calls (before)
+- `afterMCPExecution` - for MCP tool calls (after)
 - `afterAgentResponse` - for agent responses
 - `afterAgentThought` - for agent thoughts
 - `stop` - for session end
@@ -65,6 +67,12 @@ echo '{"hook_event_name":"afterShellExecution"}' | node dist/hook/runner.js
 
 # Test tool call event with command (terminal commands will show in UI)
 echo '{"hook_event_name":"afterShellExecution","command":"npm run build"}' | node dist/hook/runner.js
+
+# Test MCP execution event (before)
+echo '{"hook_event_name":"beforeMCPExecution","mcp_server":"filesystem","mcp_tool":"read_file","args":{"path":"/tmp/test.txt"}}' | node dist/hook/runner.js
+
+# Test MCP execution event (after)
+echo '{"hook_event_name":"afterMCPExecution","mcp_server":"filesystem","mcp_tool":"read_file","args":{"path":"/tmp/test.txt"}}' | node dist/hook/runner.js
 ```
 
 Then check if an event appears in the UI or log file (`~/.idlehands/events.ndjson`).
@@ -77,8 +85,9 @@ The hook runner extracts the following from payloads:
 - **Command strings**: From `command`, `command_line`, `cmd`, or `shell.command` fields
 - **Tool names**: From `tool`, `toolName`, `tool_name`, or inferred from hook event names
 - **Read/write kind**: Determined from hook event name (`beforeReadFile` = read, `afterFileEdit` = write)
+- **MCP details**: From `mcp_server`/`server`/`server_name`, `mcp_tool`/`tool`/`tool_name`, and `args`/`arguments`/`params`/`input` fields. Formatted as "server/tool (args)" in the activity log.
 
-Terminal commands are displayed in the activity log under the EXECUTING mode when available.
+Terminal commands and MCP tool calls are displayed in the activity log under the EXECUTING mode when available.
 
 ## Agent State Events
 

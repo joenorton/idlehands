@@ -56,7 +56,7 @@ export class ActivityLog {
         }
         .log-entry {
           display: grid;
-          grid-template-columns: 80px 100px 1fr;
+          grid-template-columns: 160px 100px 1fr;
           gap: 12px;
           padding: 6px 12px;
           border-bottom: 1px solid rgba(100, 100, 120, 0.1);
@@ -70,6 +70,7 @@ export class ActivityLog {
         .log-timestamp {
           color: rgba(150, 150, 170, 0.7);
           font-size: 10px;
+          white-space: nowrap;
         }
         .log-mode {
           font-weight: 600;
@@ -139,6 +140,16 @@ export class ActivityLog {
         } else {
           // Fallback: just show tool name without phase
           evidence = toolName;
+        }
+      } else if (toolLower === 'mcp') {
+        // MCP tool: show phase and MCP evidence (server/tool/args) prominently
+        const phaseLabel = tc.phase === 'start' ? 'start' : 'end';
+        if (tc.command) {
+          // Command field contains extracted MCP details from extractMCPEvidence
+          evidence = `mcp (${phaseLabel}) - ${tc.command}`;
+        } else {
+          // Fallback: just show tool name with phase
+          evidence = `mcp (${phaseLabel})`;
         }
       } else {
         // Other tools (terminal, etc.): show tool (phase) - command

@@ -91,11 +91,15 @@ function extractTool(payload: any): string | null {
   // Check hook_event_name for tool-related events
   const hookEvent = payload.hook_event_name;
   if (hookEvent === 'beforeShellExecution' || hookEvent === 'afterShellExecution') return 'terminal';
+  if (hookEvent === 'beforeMCPExecution' || hookEvent === 'afterMCPExecution') return 'mcp';
   
   // Check for explicit tool fields
   if (typeof payload.tool === 'string') return payload.tool;
   if (typeof payload.toolName === 'string') return payload.toolName;
   if (typeof payload.tool_name === 'string') return payload.tool_name;
+  
+  // Check for MCP-specific fields
+  if (payload.mcp_server || payload.mcp_tool) return 'mcp';
   
   // Check command field - might indicate tool usage
   if (typeof payload.command === 'string') {
@@ -160,8 +164,8 @@ function extractKind(payload: any): 'read' | 'write' | null {
 function extractPhase(payload: any): 'start' | 'end' | null {
   // Check hook_event_name for phase indication
   const hookEvent = payload.hook_event_name;
-  if (hookEvent === 'beforeShellExecution' || hookEvent === 'beforeReadFile') return 'start';
-  if (hookEvent === 'afterShellExecution' || hookEvent === 'afterFileEdit') return 'end';
+  if (hookEvent === 'beforeShellExecution' || hookEvent === 'beforeReadFile' || hookEvent === 'beforeMCPExecution') return 'start';
+  if (hookEvent === 'afterShellExecution' || hookEvent === 'afterFileEdit' || hookEvent === 'afterMCPExecution') return 'end';
   
   if (payload.phase === 'start' || payload.phase === 'end') return payload.phase;
   if (payload.state === 'start' || payload.state === 'end') return payload.state;
@@ -279,6 +283,87 @@ function extractInternetEvidence(payload: any): string | undefined {
   return undefined;
 }
 
+function extractMCPEvidence(payload: any): string | undefined {
+  // Extract MCP server name
+  let server: string | undefined;
+  if (typeof payload.mcp_server === 'string' && payload.mcp_server.trim()) {
+    server = payload.mcp_server.trim();
+  } else if (typeof payload.server === 'string' && payload.server.trim()) {
+    server = payload.server.trim();
+  } else if (typeof payload.server_name === 'string' && payload.server_name.trim()) {
+    server = payload.server_name.trim();
+  }
+  
+  // Extract MCP tool name
+  let tool: string | undefined;
+  if (typeof payload.mcp_tool === 'string' && payload.mcp_tool.trim()) {
+    tool = payload.mcp_tool.trim();
+  } else if (typeof payload.tool === 'string' && payload.tool.trim()) {
+    tool = payload.tool.trim();
+  } else if (typeof payload.tool_name === 'string' && payload.tool_name.trim()) {
+    tool = payload.tool_name.trim();
+  } else if (typeof payload.name === 'string' && payload.name.trim()) {
+    tool = payload.name.trim();
+  }
+  
+  // Extract arguments/parameters
+  let argsStr: string | undefined;
+  if (payload.args) {
+    if (typeof payload.args === 'string') {
+      argsStr = payload.args.trim();
+    } else if (typeof payload.args === 'object') {
+      const entries = Object.entries(payload.args);
+      if (entries.length > 0) {
+        argsStr = entries.map(([k, v]) => {
+          const val = typeof v === 'string' ? v : JSON.stringify(v);
+          return val.length > 30 ? val.substring(0, 30) + '...' : val;
+        }).join(', ');
+      }
+    }
+  } else if (payload.arguments && typeof payload.arguments === 'object') {
+    const entries = Object.entries(payload.arguments);
+    if (entries.length > 0) {
+      argsStr = entries.map(([k, v]) => {
+        const val = typeof v === 'string' ? v : JSON.stringify(v);
+        return val.length > 30 ? val.substring(0, 30) + '...' : val;
+      }).join(', ');
+    }
+  } else if (payload.params && typeof payload.params === 'object') {
+    const entries = Object.entries(payload.params);
+    if (entries.length > 0) {
+      argsStr = entries.map(([k, v]) => {
+        const val = typeof v === 'string' ? v : JSON.stringify(v);
+        return val.length > 30 ? val.substring(0, 30) + '...' : val;
+      }).join(', ');
+    }
+  } else if (payload.input) {
+    if (typeof payload.input === 'string') {
+      argsStr = payload.input.length > 60 ? payload.input.substring(0, 60) + '...' : payload.input;
+    } else if (typeof payload.input === 'object') {
+      argsStr = JSON.stringify(payload.input);
+      if (argsStr.length > 60) {
+        argsStr = argsStr.substring(0, 60) + '...';
+      }
+    }
+  }
+  
+  // Format: "server/tool (args)" or "server/tool" or "tool (args)" or just "tool"
+  if (server && tool) {
+    return argsStr ? `${server}/${tool} (${argsStr})` : `${server}/${tool}`;
+  } else if (tool) {
+    return argsStr ? `${tool} (${argsStr})` : tool;
+  } else if (server) {
+    return argsStr ? `${server} (${argsStr})` : server;
+  }
+  
+  // Fallback: try to extract from other fields
+  if (argsStr) {
+    return argsStr;
+  }
+  
+  return undefined;
+}
+
 function extractToolArgs(payload: any): string | undefined {
   // Extract arguments for tool calls (for tools panel)
   // Check for args, arguments, params, parameters fields
@@ -369,6 +454,9 @@ export function extractEventFromPayload(
     } else if (toolLower === 'internet' || toolLower.includes('internet') || toolLower.includes('web') || toolLower.includes('browser')) {
       // Internet: extract URL/query evidence
       command = extractInternetEvidence(payload);
+    } else if (toolLower === 'mcp') {
+      // MCP: extract server/tool/args evidence
+      command = extractMCPEvidence(payload);
     } else {
       // Other tools: extract tool name and args
       const toolName = sanitizeTool(tool);
