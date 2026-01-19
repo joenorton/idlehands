@@ -1,4 +1,4 @@
-export type EventType = 'session' | 'file_touch' | 'tool_call' | 'unknown' | 'agent_state';
+export type EventType = 'session' | 'file_touch' | 'tool_call' | 'unknown' | 'agent_state' | 'run' | 'thrash';
 
 export interface BaseEvent {
   v: number;
@@ -41,7 +41,39 @@ export interface AgentStateEvent extends BaseEvent {
   metadata?: Record<string, any>; // Optional metadata (model, duration, etc.)
 }
 
-export type Event = SessionEvent | FileTouchEvent | ToolCallEvent | UnknownEvent | AgentStateEvent;
+export interface RunEvent extends BaseEvent {
+  type: 'run';
+  phase: 'start' | 'end';
+  run_id: string;
+  inferred: boolean;
+  reason: 'after_end_marker' | 'gap' | 'end_marker';
+}
+
+export interface ThrashStartEvent extends BaseEvent {
+  type: 'thrash';
+  phase: 'start';
+  run_id: string;
+  signature: 'internet_only' | 'internet_test_loop' | 'test_only' | 'switch_frenzy';
+}
+
+export interface ThrashEndEvent extends BaseEvent {
+  type: 'thrash';
+  phase: 'end';
+  run_id: string;
+  signature: 'internet_only' | 'internet_test_loop' | 'test_only' | 'switch_frenzy';
+  evidence: {
+    duration: number;
+    researchCalls: number;
+    testRestarts: number;
+    writes: number;
+    writesCode: number;
+    longestNoProgressGap: number;
+    switchRate: number;
+    confidence: 'low' | 'medium' | 'high';
+  };
+}
+
+export type Event = SessionEvent | FileTouchEvent | ToolCallEvent | UnknownEvent | AgentStateEvent | RunEvent | ThrashStartEvent | ThrashEndEvent;
 
 export function createEvent(
   type: EventType,
@@ -66,6 +98,10 @@ export function createEvent(
       return { ...base, ...data, type: 'unknown' } as UnknownEvent;
     case 'agent_state':
       return { ...base, ...data, type: 'agent_state' } as AgentStateEvent;
+    case 'run':
+      return { ...base, ...data, type: 'run' } as RunEvent;
+    case 'thrash':
+      return { ...base, ...data, type: 'thrash' } as ThrashStartEvent | ThrashEndEvent;
   }
 }
 

@@ -3,7 +3,9 @@ import { AgentController } from './agent.js';
 import { Timeline } from './timeline.js';
 import { ActivityLog } from './activityLog.js';
 import { AgentStateMachine, type AgentState } from './state.js';
-import type { Event, FileTouchEvent, ToolCallEvent, SessionEvent, AgentStateEvent } from '../model/events.js';
+import { RunGrouper } from './runGrouper.js';
+import { ThrashDetector } from './thrashDetector.js';
+import type { Event, FileTouchEvent, ToolCallEvent, SessionEvent, AgentStateEvent, RunEvent, ThrashStartEvent, ThrashEndEvent } from '../model/events.js';
 import type { Layout } from '../server/layout.js';
 
 interface AppState {
@@ -30,6 +32,8 @@ class App {
   private sharedMapRenderer: MapRenderer;
   private stateMachine: AgentStateMachine;
   private activityLog: ActivityLog;
+  private runGrouper: RunGrouper;
+  private thrashDetector: ThrashDetector;
   private state: AppState = {
     layout: null,
     events: [],
@@ -60,6 +64,8 @@ class App {
       document.getElementById('timeline')!
     );
     this.activityLog = new ActivityLog('activityLog');
+    this.runGrouper = new RunGrouper();
+    this.thrashDetector = new ThrashDetector();
 
     // Initialize state machine with transition handler
     this.stateMachine = new AgentStateMachine((transition) => {
@@ -153,15 +159,24 @@ class App {
       
       // Process loaded events to build state and evidence
       for (const event of events) {
-        this.stateMachine.processEvent(event);
-        // Add to activity log
-        const currentState = this.stateMachine.getState();
-        this.activityLog.addEvent(event, currentState || '');
-        
-        // Track active file from file_touch events
-        if (event.type === 'file_touch') {
-          const ft = event as FileTouchEvent;
-          this.agentController.setActiveFile(ft.path);
+        // Process through run grouper
+        const runGroupedEvents = this.runGrouper.processEvent(event);
+        for (const groupedEvent of runGroupedEvents) {
+          // Process through thrash detector
+          const currentRunId = this.runGrouper.getCurrentRunId();
+          const thrashProcessedEvents = this.thrashDetector.processEvent(groupedEvent, currentRunId);
+          for (const processedEvent of thrashProcessedEvents) {
+            this.stateMachine.processEvent(processedEvent);
+            // Add to activity log
+            const currentState = this.stateMachine.getState();
+            this.activityLog.addEvent(processedEvent, currentState || '');
+            
+            // Track active file from file_touch events
+            if (processedEvent.type === 'file_touch') {
+              const ft = processedEvent as FileTouchEvent;
+              this.agentController.setActiveFile(ft.path);
+            }
+          }
         }
       }
       
@@ -238,14 +253,23 @@ class App {
       
       // Process loaded events to build state (in chronological order)
       for (const event of events.reverse()) {
-        this.stateMachine.processEvent(event);
-        const currentState = this.stateMachine.getState();
-        this.activityLog.addEvent(event, currentState || '');
-        
-        // Track active file from file_touch events
-        if (event.type === 'file_touch') {
-          const ft = event as FileTouchEvent;
-          this.agentController.setActiveFile(ft.path);
+        // Process through run grouper
+        const runGroupedEvents = this.runGrouper.processEvent(event);
+        for (const groupedEvent of runGroupedEvents) {
+          // Process through thrash detector
+          const currentRunId = this.runGrouper.getCurrentRunId();
+          const thrashProcessedEvents = this.thrashDetector.processEvent(groupedEvent, currentRunId);
+          for (const processedEvent of thrashProcessedEvents) {
+            this.stateMachine.processEvent(processedEvent);
+            const currentState = this.stateMachine.getState();
+            this.activityLog.addEvent(processedEvent, currentState || '');
+            
+            // Track active file from file_touch events
+            if (processedEvent.type === 'file_touch') {
+              const ft = processedEvent as FileTouchEvent;
+              this.agentController.setActiveFile(ft.path);
+            }
+          }
         }
       }
       
@@ -318,117 +342,149 @@ class App {
           continue;
         }
         
-        this.state.events.push(newEvent);
+        // If we're receiving new activity events and session was marked as ended, reset it
+        // (new activity indicates session has restarted, even without explicit session start)
+        if (this.isSessionEnded && 
+            (newEvent.type === 'file_touch' || newEvent.type === 'tool_call' || 
+             newEvent.type === 'agent_state' || newEvent.type === 'run')) {
+          this.isSessionEnded = false;
+        }
+        
+        // Step 1: Run grouper (may inject synthetic run.start/run.end)
+        const runGroupedEvents = this.runGrouper.processEvent(newEvent);
+        
+        // Step 2: Process each event (original + any synthetic run events)
+        for (const event of runGroupedEvents) {
+          // Step 3: Thrash detector (may inject synthetic thrash.start/thrash.end)
+          const currentRunId = this.runGrouper.getCurrentRunId();
+          const thrashProcessedEvents = this.thrashDetector.processEvent(event, currentRunId);
+          
+          // Step 4: Process each event (original + synthetic run + synthetic thrash)
+          for (const processedEvent of thrashProcessedEvents) {
+            this.state.events.push(processedEvent);
       
-        // Enforce event array size limit to prevent memory issues
-        if (this.state.events.length > MAX_EVENTS_IN_MEMORY) {
-          // Remove oldest events (keep newest)
-          const eventsToRemove = this.state.events.length - MAX_EVENTS_IN_MEMORY;
-          this.state.events = this.state.events.slice(eventsToRemove);
-          console.warn(`[App] Removed ${eventsToRemove} old events to maintain memory limit`);
-        }
-        
-        this.timeline.addEvent(newEvent);
-        
-        // Update stats
-        const now = Date.now();
-        this.state.lastEventTime = newEvent.ts;
-        this.state.eventCount++;
-        this.eventRateWindow.push(now);
-        // Keep only last second of events
-        this.eventRateWindow = this.eventRateWindow.filter(t => now - t < 1000);
-        this.state.eventsPerSecond = this.eventRateWindow.length;
-        this.state.idleSeconds = 0;
-        
-        // Handle tool call lifecycle
-        if (newEvent.type === 'tool_call') {
-          const tc = newEvent as ToolCallEvent;
-          const toolKey = `${tc.tool}:${tc.command || ''}`;
-          
-          if (tc.phase === 'start') {
-            // Track tool call start
-            this.activeToolCalls.set(toolKey, {
-              startTime: newEvent.ts * 1000,
-              tool: tc.tool,
-              command: tc.command,
-            });
+            // Enforce event array size limit to prevent memory issues
+            if (this.state.events.length > MAX_EVENTS_IN_MEMORY) {
+              // Remove oldest events (keep newest)
+              const eventsToRemove = this.state.events.length - MAX_EVENTS_IN_MEMORY;
+              this.state.events = this.state.events.slice(eventsToRemove);
+              console.warn(`[App] Removed ${eventsToRemove} old events to maintain memory limit`);
+            }
             
-            // Clear active file label for tool calls
-            this.agentController.setActiveFile(null);
+            this.timeline.addEvent(processedEvent);
             
-            // Set timeout to mark as incomplete if no end event
-            setTimeout(() => {
-              if (this.activeToolCalls.has(toolKey)) {
-                // Tool call is incomplete/hung - mark it but don't keep UI stuck
-                console.warn(`[App] Tool call incomplete after timeout: ${tc.tool}`);
+            // Update stats (use original event timestamp for stats)
+            const now = Date.now();
+            this.state.lastEventTime = processedEvent.ts;
+            this.state.eventCount++;
+            this.eventRateWindow.push(now);
+            // Keep only last second of events
+            this.eventRateWindow = this.eventRateWindow.filter(t => now - t < 1000);
+            this.state.eventsPerSecond = this.eventRateWindow.length;
+            this.state.idleSeconds = 0;
+            
+            // Handle run boundary events
+            if (processedEvent.type === 'run') {
+              const re = processedEvent as RunEvent;
+              // Run boundaries are handled by grouper/detector, just render them
+            }
+            
+            // Handle thrash events
+            if (processedEvent.type === 'thrash') {
+              // Thrash events are handled by detector, just render them
+            }
+            
+            // Handle tool call lifecycle
+            if (processedEvent.type === 'tool_call') {
+              const tc = processedEvent as ToolCallEvent;
+              const toolKey = `${tc.tool}:${tc.command || ''}`;
+              
+              if (tc.phase === 'start') {
+                // Track tool call start
+                this.activeToolCalls.set(toolKey, {
+                  startTime: processedEvent.ts * 1000,
+                  tool: tc.tool,
+                  command: tc.command,
+                });
+                
+                // Clear active file label for tool calls
+                this.agentController.setActiveFile(null);
+                
+                // Set timeout to mark as incomplete if no end event
+                setTimeout(() => {
+                  if (this.activeToolCalls.has(toolKey)) {
+                    // Tool call is incomplete/hung - mark it but don't keep UI stuck
+                    console.warn(`[App] Tool call incomplete after timeout: ${tc.tool}`);
+                    this.activeToolCalls.delete(toolKey);
+                    // Don't transition state - let it clear naturally
+                  }
+                }, this.toolCallTimeout);
+              } else if (tc.phase === 'end') {
+                // Clear tool call tracking
                 this.activeToolCalls.delete(toolKey);
-                // Don't transition state - let it clear naturally
               }
-            }, this.toolCallTimeout);
-          } else if (tc.phase === 'end') {
-            // Clear tool call tracking
-            this.activeToolCalls.delete(toolKey);
-          }
-        }
-        
-        // Handle file_touch events - update active file label
-        if (newEvent.type === 'file_touch') {
-          const ft = newEvent as FileTouchEvent;
-          this.agentController.setActiveFile(ft.path);
-        }
-        
-        // Handle session boundaries
-        if (newEvent.type === 'session') {
-          const se = newEvent as SessionEvent;
-          if (se.state === 'stop') {
-            // Mark session as ended
-            this.isSessionEnded = true;
-            // Clear all active tool calls on session stop
-            this.activeToolCalls.clear();
-            // Clear active file label
-            this.agentController.setActiveFile(null);
-            // Move agent to home
-            this.agentController.moveToHome(false);
-            this.mapRenderer.setActiveZone(null);
-          } else if (se.state === 'start') {
-            // Mark session as active when a new session starts
-            this.isSessionEnded = false;
-          }
-        }
-        
-        // Handle agent_state events as ephemeral beacons (don't cause state transitions)
-        if (newEvent.type === 'agent_state') {
-          const as = newEvent as AgentStateEvent;
-          if (as.state === 'thinking' || as.state === 'responding') {
-            // Show ephemeral beacon (emoji bubble) but don't move agent
-            this.agentController.setAgentState(as.state as 'thinking' | 'responding');
-          }
-        }
-        
-        // Process event through state machine (handles transitions for activity events only)
-        const stateChanged = this.stateMachine.processEvent(newEvent);
-        const currentState = this.stateMachine.getState();
-        
-        // Update active zone if state changed (only for activity zones)
-        if (stateChanged) {
-          if (currentState) {
-            this.mapRenderer.setActiveZone(`zone:${currentState}`);
-          }
-        }
+            }
+            
+            // Handle file_touch events - update active file label
+            if (processedEvent.type === 'file_touch') {
+              const ft = processedEvent as FileTouchEvent;
+              this.agentController.setActiveFile(ft.path);
+            }
+            
+            // Handle session boundaries
+            if (processedEvent.type === 'session') {
+              const se = processedEvent as SessionEvent;
+              if (se.state === 'stop') {
+                // Mark session as ended
+                this.isSessionEnded = true;
+                // Clear all active tool calls on session stop
+                this.activeToolCalls.clear();
+                // Clear active file label
+                this.agentController.setActiveFile(null);
+                // Move agent to home
+                this.agentController.moveToHome(false);
+                this.mapRenderer.setActiveZone(null);
+              } else if (se.state === 'start') {
+                // Mark session as active when a new session starts
+                this.isSessionEnded = false;
+              }
+            }
+            
+            // Handle agent_state events as ephemeral beacons (don't cause state transitions)
+            if (processedEvent.type === 'agent_state') {
+              const as = processedEvent as AgentStateEvent;
+              if (as.state === 'thinking' || as.state === 'responding') {
+                // Show ephemeral beacon (emoji bubble) but don't move agent
+                this.agentController.setAgentState(as.state as 'thinking' | 'responding');
+              }
+            }
+            
+            // Process event through state machine (handles transitions for activity events only)
+            const stateChanged = this.stateMachine.processEvent(processedEvent);
+            const currentState = this.stateMachine.getState();
+            
+            // Update active zone if state changed (only for activity zones)
+            if (stateChanged) {
+              if (currentState) {
+                this.mapRenderer.setActiveZone(`zone:${currentState}`);
+              }
+            }
 
-        // Check if event should trigger pulse on current zone (even if state didn't change)
-        if (!stateChanged && currentState) {
-          const eventZone = this.getZoneForEvent(newEvent);
-          const currentZoneId = `zone:${currentState}`;
-          
-          // If event maps to current zone, trigger pulse
-          if (eventZone === currentZoneId) {
-            this.mapRenderer.triggerZonePulse(currentZoneId);
+            // Check if event should trigger pulse on current zone (even if state didn't change)
+            if (!stateChanged && currentState) {
+              const eventZone = this.getZoneForEvent(processedEvent);
+              const currentZoneId = `zone:${currentState}`;
+              
+              // If event maps to current zone, trigger pulse
+              if (eventZone === currentZoneId) {
+                this.mapRenderer.triggerZonePulse(currentZoneId);
+              }
+            }
+
+            // Add event to activity log (deduplication handled in ActivityLog)
+            this.activityLog.addEvent(processedEvent, currentState || '');
           }
         }
-
-        // Add event to activity log (deduplication handled in ActivityLog)
-        this.activityLog.addEvent(newEvent, currentState || '');
       }
       
       // Update scope width
@@ -495,6 +551,7 @@ class App {
     const lastEventEl = document.getElementById('lastEvent')!;
     const eventsPerSecEl = document.getElementById('eventsPerSec')!;
     const idleSecondsEl = document.getElementById('idleSeconds')!;
+    const thrashHealthEl = document.getElementById('thrashHealth')!;
     
     // Show "session ended" if session has ended, otherwise show current activity mode
     if (this.isSessionEnded) {
@@ -515,6 +572,27 @@ class App {
       this.state.idleSeconds = Math.floor(now - this.state.lastEventTime);
     }
     idleSecondsEl.textContent = this.state.idleSeconds.toString();
+
+    // Update thrash health indicator
+    const thrashState = this.thrashDetector.getState();
+    const metrics = this.thrashDetector.getMetrics();
+    const thrashHealthLabelEl = document.getElementById('thrashHealthLabel')!;
+    
+    // Remove all state classes
+    thrashHealthEl.classList.remove('churn', 'thrash');
+    
+    if (thrashState === 'THRASH') {
+      thrashHealthEl.classList.add('thrash');
+      thrashHealthLabelEl.textContent = 'thrash';
+      thrashHealthEl.title = `thrash: ${metrics.research30s}/30s internet, ${metrics.tests90s}/90s tests, ${metrics.progressCode90s}/90s writes, ${(metrics.switchRate30s * 100).toFixed(0)}% switch rate`;
+    } else if (thrashState === 'CHURN') {
+      thrashHealthEl.classList.add('churn');
+      thrashHealthLabelEl.textContent = 'churn';
+      thrashHealthEl.title = `churn: ${metrics.research30s}/30s internet, ${metrics.tests90s}/90s tests, ${metrics.progressCode90s}/90s writes, ${(metrics.switchRate30s * 100).toFixed(0)}% switch rate`;
+    } else {
+      thrashHealthLabelEl.textContent = 'normal';
+      thrashHealthEl.title = `normal: ${metrics.research30s}/30s internet, ${metrics.tests90s}/90s tests, ${metrics.progressCode90s}/90s writes`;
+    }
   }
 
   private render() {

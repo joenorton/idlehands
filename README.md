@@ -4,7 +4,7 @@ An activity-centric, temporal visualization tool for Cursor agent telemetry. Wat
 
 Idlehands makes AI agent behavior observable by showing activity modes, transitions, and concrete evidence in a temporal view. The system answers: "what mode is the agent in, how long has it been there, and what concrete actions are occurring?" The visual style is inspired by the Gibson scene from *Hackers*, but the system is grounded in real telemetry data from Cursor hooks—no metaphorical cyberspace.
 
-![Idlehands Screenshot](marketing/idlehands-scrnshot.jpg)
+![Idlehands Demo](marketing/idlehands-short.gif)
 
 ## Quick Start
 
@@ -107,6 +107,7 @@ Idlehands makes AI agent behavior observable by showing activity modes, transiti
 - **Temporal Evidence**: All evidence lives in the activity log—one row per event or phase transition, with no aggregation or inference
 - **Live Timeline**: Visual indicator showing the last 5 minutes of events (v0: live-only, no replay)
 - **Status Panel**: Real-time metrics showing current activity mode, dwell time, events per second, and idle time
+- **Thrash Detection**: Real-time "waste detector" that identifies periods of high activity (internet/search/tests) with low progress (code writes). Shows health indicator (normal/churn/thrash) and collapses noise into labeled thrash spans with evidence
 - **Privacy-First**: Only logs repo-relative paths and tool names, never file contents, diffs, prompts, or environment variables
 
 ## Layout Algorithm
@@ -175,6 +176,8 @@ The layout uses a simple activity-first, temporal system. All visual emphasis de
 - **Layout Engine** (`src/server/layout.ts`): Simple layout with zone anchors for agent movement (no filesystem scanning)
 - **Payload Extractor** (`src/model/payload.ts`): Robust extraction of file paths, commands, URLs, and tool calls from Cursor's hook payloads
 - **State Machine** (`src/ui/state.ts`): Canonical agent state machine managing transitions between reading, writing, and executing. Agent states (thinking, responding) are ephemeral beacons only and do not cause state transitions.
+- **Run Grouper** (`src/ui/runGrouper.ts`): Groups events into runs based on explicit end markers or inactivity gaps, emitting synthetic run boundary events
+- **Thrash Detector** (`src/ui/thrashDetector.ts`): Real-time waste detector analyzing event patterns to identify thrash spans (high activity, low progress)
 - **UI Components**:
   - `ActivityLog`: Primary activity log table with virtual scrolling. Only renders visible entries and computes age lazily for performance. Uses DocumentFragment for efficient DOM updates.
   - `MapRenderer`: Renders zone anchors (semantic labels, not visual containers)
@@ -186,6 +189,56 @@ The layout uses a simple activity-first, temporal system. All visual emphasis de
 
 - **Activity Log**: Scrollable table showing all events in time order (newest first). Uses virtual scrolling for performance with large event counts.
 - **Status Panel**: Shows current activity mode, dwell time, events per second, and idle time. Displays backpressure warnings if events are being dropped.
+- **Thrash Health Indicator**: Color-coded dot (green/yellow/red) next to status panel showing thrash detector state:
+  - **Green (normal)**: No thrash detected
+  - **Yellow (churn)**: Elevated metrics but not yet thrash (1 trigger active)
+  - **Red (thrash)**: Active thrash span (2+ triggers, sustained pattern)
+  - Hover tooltip shows detailed metrics (internet calls, test restarts, writes, switch rate)
+
+## Thrash Detection
+
+Idlehands includes a real-time "waste detector" that analyzes event streams to identify periods where the agent is doing lots of *activity* (internet/search/tests) with little or no *progress* (code writes).
+
+### How It Works
+
+1. **Run Grouping**: Events are grouped into "runs" based on explicit end markers (session stops) or inactivity gaps (≥30s). Synthetic `run.start` and `run.end` events mark run boundaries.
+
+2. **Event Categorization**: Events are mapped to activity buckets:
+   - `PROGRESS_CODE`: Code file writes (`.ts`, `.js`, files in `src/`, `dist/`)
+   - `PROGRESS_DOC`: Documentation writes (`.md`, etc.)
+   - `VALIDATE`: Test runs (start only)
+   - `RESEARCH`: Internet/search calls (start only)
+   - `READ`: File reads
+   - `CONTROL`: Session/agent state events
+
+3. **Rolling Windows**: Maintains 30s and 90s rolling windows tracking:
+   - Counts per bucket
+   - Max repeats of same tool/target in 30s
+   - Category switch rate
+   - Time since last code write
+
+4. **Thrash Triggers** (requires 2+ to enter THRASH state):
+   - **Research storm**: 6+ internet calls in 30s with 0 code writes in 90s
+   - **Validation spam**: 2+ test restarts in 90s with 0 writes since last test
+   - **Repeat loop**: Same tool/target called 5+ times in 30s
+   - **Switch frenzy**: 45%+ category switch rate in 30s with 0 code writes in 90s
+
+5. **Hysteresis**: 
+   - Grace period: No thrash until run age ≥15s OR first code write
+   - Minimum span duration: 8-10s before showing thrash badge
+   - Cooldown: 10s after thrash ends before allowing re-entry
+   - Exit: Immediate exit on first code write
+
+### UI Features
+
+- **Health Indicator**: Color-coded dot in status panel (green/yellow/red) with state label
+- **Thrash Badges**: In activity log, thrash spans appear as expandable badges showing:
+  - Signature (internet_only, internet_test_loop, test_only, switch_frenzy)
+  - Duration
+  - Evidence: research calls, test restarts, writes, switch rate, no-progress gap, confidence
+- **Run Boundaries**: Synthetic run.start/run.end events shown as separators in activity log
+
+The detector is conservative by design—red (thrash) should be rare, yellow (churn) more common during noisy periods. Thresholds can be tuned based on real usage patterns.
 
 ## Event Types
 
@@ -273,6 +326,47 @@ Session events mark session boundaries. On session stop, the agent returns to ho
 ```
 
 Gap events are emitted when the WebSocket queue overflows and events must be dropped. The UI displays these to indicate missed events. This is rare and only occurs when the client cannot process events fast enough.
+
+### Run Event
+```json
+{
+  "v": 1,
+  "ts": 1234567890.123,
+  "type": "run",
+  "session_id": "session_123",
+  "phase": "start" | "end",
+  "run_id": "run_1234567890_1",
+  "inferred": true,
+  "reason": "after_end_marker" | "gap" | "end_marker"
+}
+```
+
+Run events are synthetic events emitted by the run grouper to mark run boundaries. They appear as separators in the activity log.
+
+### Thrash Event
+```json
+{
+  "v": 1,
+  "ts": 1234567890.123,
+  "type": "thrash",
+  "session_id": "session_123",
+  "phase": "start" | "end",
+  "run_id": "run_1234567890_1",
+  "signature": "internet_only" | "internet_test_loop" | "test_only" | "switch_frenzy",
+  "evidence": {
+    "duration": 45.2,
+    "researchCalls": 14,
+    "testRestarts": 2,
+    "writes": 0,
+    "writesCode": 0,
+    "longestNoProgressGap": 68.5,
+    "switchRate": 0.52,
+    "confidence": "high"
+  }
+}
+```
+
+Thrash events are synthetic events emitted by the thrash detector. `thrash.start` marks the beginning of a thrash span; `thrash.end` includes evidence about the span. They appear as expandable badges in the activity log.
 
 ## Configuration
 

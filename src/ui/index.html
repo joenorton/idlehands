@@ -73,6 +73,25 @@
       font-weight: 500;
     }
 
+    .thrash-health {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: #10b981; /* green - normal */
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+
+    .thrash-health.churn {
+      background: #f59e0b; /* yellow - churn */
+    }
+
+    .thrash-health.thrash {
+      background: #ef4444; /* red - thrash */
+    }
+
 
     button {
       background: #2a2a2a;
@@ -132,6 +151,10 @@
   <div id="controls">
     <span id="status">Connecting...</span>
     <div id="statusPanel">
+      <div class="stat">
+        <span id="thrashHealth" class="thrash-health" title="Thrash detector status"></span>
+        <span class="stat-label" id="thrashHealthLabel">thrash</span>
+      </div>
       <div class="stat">
         <span class="stat-label">Last:</span>
         <span class="stat-value" id="lastEvent">-</span>

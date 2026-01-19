@@ -1,15 +1,21 @@
-import type { Event, FileTouchEvent, ToolCallEvent, AgentStateEvent, SessionEvent } from '../model/events.js';
+import type { Event, FileTouchEvent, ToolCallEvent, AgentStateEvent, SessionEvent, RunEvent, ThrashStartEvent, ThrashEndEvent } from '../model/events.js';
 
 export interface LogEntry {
   timestamp: number;
-  mode: 'READ' | 'WRITE' | 'EXECUTING' | 'THOUGHT_COMPLETE' | 'RESPONSE_COMPLETE';
+  mode: 'READ' | 'WRITE' | 'EXECUTING' | 'THOUGHT_COMPLETE' | 'RESPONSE_COMPLETE' | 'RUN' | 'THRASH';
   name: string; // File name or tool name
   details: string; // Command details, args, etc.
   age: number; // Seconds since event (computed lazily for visible entries only)
   sessionId: string; // Session ID for boundary detection
   isNew?: boolean; // Flag for flash animation
   isSessionBoundary?: boolean; // Flag for session separator
+  isRunBoundary?: boolean; // Flag for run separator
   eventKey: string; // Store for seenEvents cleanup (Fix 4)
+  thrashData?: {
+    signature: string;
+    evidence?: any;
+    isActive?: boolean;
+  };
 }
 
 export class ActivityLog {
@@ -19,6 +25,7 @@ export class ActivityLog {
   private renderScheduled = false;
   private seenEvents = new Set<string>(); // Track seen events to prevent duplicates
   private lastSessionId: string | null = null; // Track session changes for boundaries
+  private activeThrashSpans = new Map<string, { startTime: number; signature: string }>(); // Track active thrash spans by run_id
 
   constructor(containerId: string) {
     const container = document.getElementById(containerId);
@@ -85,6 +92,8 @@ export class ActivityLog {
         .log-mode.EXECUTING { color: #8b5cf6; }
         .log-mode.THOUGHT_COMPLETE { color: #a855f7; }
         .log-mode.RESPONSE_COMPLETE { color: #ec4899; }
+        .log-mode.RUN { color: #fbbf24; }
+        .log-mode.THRASH { color: #ef4444; }
         .log-name {
           color: rgba(200, 200, 220, 0.9);
           font-size: 11px;
@@ -135,6 +144,27 @@ export class ActivityLog {
           margin: 4px 0;
           opacity: 0.6;
         }
+        .run-boundary {
+          height: 1px;
+          background: linear-gradient(to right, transparent, #6b7280, transparent);
+          margin: 2px 0;
+          opacity: 0.4;
+        }
+        .thrash-badge {
+          background: rgba(239, 68, 68, 0.1);
+          border-left: 2px solid #ef4444;
+          padding: 4px 8px;
+          margin: 2px 0;
+        }
+        .thrash-badge.expanded {
+          background: rgba(239, 68, 68, 0.15);
+        }
+        .thrash-evidence {
+          font-size: 9px;
+          color: rgba(200, 200, 220, 0.7);
+          margin-top: 4px;
+          padding-left: 12px;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -144,10 +174,8 @@ export class ActivityLog {
     // Use canonical event ID if available, otherwise fall back to generated key
     const eventKey = event.id || this.getEventKey(event);
     if (this.seenEvents.has(eventKey)) {
-      // Log duplicate detection for debugging
-      if (process.env.NODE_ENV === 'development') {
-        console.warn(`[ActivityLog] Duplicate event detected: ${eventKey} - skipping`);
-      }
+      // Log duplicate detection for debugging (always log, can be filtered in console)
+      console.warn(`[ActivityLog] Duplicate event detected: ${eventKey} - skipping`);
       return; // Already seen this event, skip
     }
     this.seenEvents.add(eventKey);
@@ -201,11 +229,15 @@ export class ActivityLog {
       if (as.state === 'thinking') {
         mode = 'THOUGHT_COMPLETE';
         name = 'thought';
-        details = 'complete';
+        // Extract text_preview from metadata if available
+        const textPreview = as.metadata?.text_preview;
+        details = textPreview || 'complete';
       } else if (as.state === 'responding') {
         mode = 'RESPONSE_COMPLETE';
         name = 'response';
-        details = 'complete';
+        // Extract text_preview from metadata if available
+        const textPreview = as.metadata?.text_preview;
+        details = textPreview || 'complete';
       }
     } else if (event.type === 'session') {
       const se = event as SessionEvent;
@@ -218,12 +250,44 @@ export class ActivityLog {
         name = 'stop';
         details = '';
       }
+    } else if (event.type === 'run') {
+      const re = event as RunEvent;
+      mode = 'RUN';
+      if (re.phase === 'start') {
+        name = 'run';
+        details = re.inferred ? `started (inferred: ${re.reason})` : 'started';
+      } else {
+        name = 'run';
+        details = re.inferred ? `ended (inferred: ${re.reason})` : `ended (${re.reason})`;
+      }
+    } else if (event.type === 'thrash') {
+      if (event.phase === 'start') {
+        const ts = event as ThrashStartEvent;
+        mode = 'THRASH';
+        name = 'thrash';
+        details = `${ts.signature}`;
+        // Track active span
+        this.activeThrashSpans.set(ts.run_id, {
+          startTime: event.ts * 1000,
+          signature: ts.signature,
+        });
+      } else {
+        const te = event as ThrashEndEvent;
+        mode = 'THRASH';
+        name = 'thrash';
+        const duration = Math.floor(te.evidence.duration);
+        const durationStr = duration < 60 ? `${duration}s` : `${Math.floor(duration / 60)}m${duration % 60}s`;
+        details = `${te.signature} (${durationStr})`;
+        // Remove from active spans
+        this.activeThrashSpans.delete(te.run_id);
+      }
     }
 
     // Only add entries for events that have a mode
     if (mode) {
       // Only mark as session boundary if it's an actual session start/stop event
       const isSessionBoundary = event.type === 'session';
+      const isRunBoundary = event.type === 'run';
       
       // Update last session ID
       if (event.type === 'session' || this.lastSessionId === null) {
@@ -239,8 +303,27 @@ export class ActivityLog {
         sessionId: event.session_id,
         isNew: true, // Mark as new for flash animation
         isSessionBoundary: isSessionBoundary,
+        isRunBoundary: isRunBoundary,
         eventKey: eventKey, // Store for seenEvents cleanup
       };
+
+      // Add thrash data if it's a thrash event
+      if (event.type === 'thrash') {
+        if (event.phase === 'start') {
+          const ts = event as ThrashStartEvent;
+          entry.thrashData = {
+            signature: ts.signature,
+            isActive: true,
+          };
+        } else {
+          const te = event as ThrashEndEvent;
+          entry.thrashData = {
+            signature: te.signature,
+            evidence: te.evidence,
+            isActive: false,
+          };
+        }
+      }
 
       this.entries.push(entry);
       
@@ -292,6 +375,17 @@ export class ActivityLog {
     } else if (event.type === 'session') {
       const se = event as SessionEvent;
       return `${ts}:${event.type}:${se.state}`;
+    } else if (event.type === 'run') {
+      const re = event as RunEvent;
+      return `${ts}:${event.type}:${re.phase}:${re.run_id}:${re.reason}`;
+    } else if (event.type === 'thrash') {
+      if (event.phase === 'start') {
+        const tse = event as ThrashStartEvent;
+        return `${ts}:${event.type}:start:${tse.run_id}:${tse.signature}`;
+      } else {
+        const te = event as ThrashEndEvent;
+        return `${ts}:${event.type}:end:${te.run_id}:${te.signature}`;
+      }
     }
     
     // Fallback for unknown events
@@ -361,24 +455,85 @@ export class ActivityLog {
       });
       
       // Check if we need a session boundary before this entry
-      const needsBoundary = entry.isSessionBoundary && 
+      const needsSessionBoundary = entry.isSessionBoundary && 
                             (entry.name === 'stop' || entry.details === 'started');
       
-      if (needsBoundary) {
+      if (needsSessionBoundary) {
         const boundary = document.createElement('div');
         boundary.className = 'session-boundary';
         fragment.appendChild(boundary);
       }
+
+      // Check if we need a run boundary
+      if (entry.isRunBoundary) {
+        const boundary = document.createElement('div');
+        boundary.className = 'run-boundary';
+        fragment.appendChild(boundary);
+      }
       
-      const entryDiv = document.createElement('div');
-      entryDiv.className = `log-entry${entry.isNew ? ' new-entry' : ''}`;
-      entryDiv.innerHTML = `
-        <div class="log-timestamp">${timeStr} (${ageText})</div>
-        <div class="log-mode ${entry.mode}">${entry.mode}</div>
-        <div class="log-name">${this.escapeHtml(entry.name)}</div>
-        <div class="log-details">${this.escapeHtml(entry.details)}</div>
-      `;
-      fragment.appendChild(entryDiv);
+      // Render thrash badge differently
+      if (entry.mode === 'THRASH') {
+        const badgeDiv = document.createElement('div');
+        badgeDiv.className = 'thrash-badge';
+        if (entry.thrashData?.isActive) {
+          // Active thrash span - show timer (recompute on each render)
+          const activeSpan = Array.from(this.activeThrashSpans.values()).find(s => s.signature === entry.thrashData?.signature);
+          let activeDuration = 0;
+          if (activeSpan) {
+            activeDuration = Math.floor((now - activeSpan.startTime) / 1000);
+          }
+          const durationStr = activeDuration < 60 ? `${activeDuration}s` : `${Math.floor(activeDuration / 60)}m${activeDuration % 60}s`;
+          badgeDiv.innerHTML = `
+            <div style="display: grid; grid-template-columns: 160px 100px 200px 1fr; gap: 12px; padding: 4px 0;">
+              <div class="log-timestamp">${timeStr} (${ageText})</div>
+              <div class="log-mode ${entry.mode}">⚠ THRASH</div>
+              <div class="log-name">${entry.thrashData.signature}</div>
+              <div class="log-details">active (${durationStr})</div>
+            </div>
+          `;
+        } else if (entry.thrashData?.evidence) {
+          // Thrash end - show summary, expandable
+          const ev = entry.thrashData.evidence;
+          const durationStr = ev.duration < 60 ? `${Math.floor(ev.duration)}s` : `${Math.floor(ev.duration / 60)}m${Math.floor(ev.duration % 60)}s`;
+          badgeDiv.innerHTML = `
+            <div style="display: grid; grid-template-columns: 160px 100px 200px 1fr; gap: 12px; padding: 4px 0; cursor: pointer;">
+              <div class="log-timestamp">${timeStr} (${ageText})</div>
+              <div class="log-mode ${entry.mode}">⚠ THRASH</div>
+              <div class="log-name">${entry.thrashData.signature}</div>
+              <div class="log-details">${durationStr}</div>
+            </div>
+            <div class="thrash-evidence" style="display: none;">
+              internet: ${ev.researchCalls} calls<br>
+              tests: ${ev.testRestarts} restarts${ev.writesCode === 0 ? ' (no code change)' : ''}<br>
+              writes: ${ev.writesCode} code, ${ev.writes - ev.writesCode} doc<br>
+              switch rate: ${(ev.switchRate * 100).toFixed(0)}%<br>
+              no-progress gap: ${Math.floor(ev.longestNoProgressGap)}s<br>
+              confidence: ${ev.confidence}
+            </div>
+          `;
+          // Add click handler for expand/collapse
+          badgeDiv.addEventListener('click', () => {
+            const evidenceDiv = badgeDiv.querySelector('.thrash-evidence') as HTMLElement;
+            if (evidenceDiv) {
+              const isHidden = evidenceDiv.style.display === 'none';
+              evidenceDiv.style.display = isHidden ? 'block' : 'none';
+              badgeDiv.classList.toggle('expanded', isHidden);
+            }
+          });
+        }
+        fragment.appendChild(badgeDiv);
+      } else {
+        // Regular entry
+        const entryDiv = document.createElement('div');
+        entryDiv.className = `log-entry${entry.isNew ? ' new-entry' : ''}`;
+        entryDiv.innerHTML = `
+          <div class="log-timestamp">${timeStr} (${ageText})</div>
+          <div class="log-mode ${entry.mode}">${entry.mode}</div>
+          <div class="log-name">${this.escapeHtml(entry.name)}</div>
+          <div class="log-details">${this.escapeHtml(entry.details)}</div>
+        `;
+        fragment.appendChild(entryDiv);
+      }
     }
     
     // Add bottom spacer if needed
