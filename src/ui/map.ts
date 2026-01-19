@@ -9,6 +9,9 @@ export class MapRenderer {
   private referenceWidth = 1200;
   private referenceHeight = 800;
   private currentActiveZone: string | null = null; // For highlighting active zone anchor
+  private zonePulses: Map<string, Array<{ startTime: number; duration: number }>> = new Map();
+  private maxPulsesPerZone = 5; // Limit concurrent pulses per zone
+  private zoneHeartbeats: Map<string, { startTime: number; duration: number }> = new Map(); // Track heartbeat animations per zone
 
   constructor(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) {
     this.canvas = canvas;
@@ -18,6 +21,33 @@ export class MapRenderer {
   // Set the active zone anchor (for highlighting)
   setActiveZone(zoneId: string | null) {
     this.currentActiveZone = zoneId;
+  }
+
+  // Trigger a pulse animation on a zone
+  triggerZonePulse(zoneId: string, duration: number = 800) {
+    if (!this.zonePulses.has(zoneId)) {
+      this.zonePulses.set(zoneId, []);
+    }
+    
+    const pulses = this.zonePulses.get(zoneId)!;
+    
+    // Limit concurrent pulses
+    if (pulses.length >= this.maxPulsesPerZone) {
+      // Remove oldest pulse to make room
+      pulses.shift();
+    }
+    
+    // Add new pulse
+    pulses.push({
+      startTime: Date.now(),
+      duration,
+    });
+
+    // Also trigger heartbeat effect (thump)
+    this.zoneHeartbeats.set(zoneId, {
+      startTime: Date.now(),
+      duration: 400, // Shorter duration for quick thump
+    });
   }
 
   setLayout(layout: Layout) {
@@ -108,19 +138,27 @@ export class MapRenderer {
     const color = zoneColors[zone.id] || '#888';
     const alpha = isActive ? 0.9 : 0.5; // Increased visibility
 
+    // Render pulse rings before main circle
+    this.renderPulseRings(zone.id, x, y, color, isActive ? 16 : 12);
+
+    // Calculate heartbeat scale (if active)
+    const baseRadius = isActive ? 16 : 12;
+    const heartbeatScale = this.getHeartbeatScale(zone.id);
+    const currentRadius = baseRadius * heartbeatScale;
+
     // Draw anchor point (larger circle for visibility in pentagon)
     this.ctx.fillStyle = color;
     this.ctx.globalAlpha = alpha;
     this.ctx.beginPath();
-    this.ctx.arc(x, y, isActive ? 16 : 12, 0, Math.PI * 2);
+    this.ctx.arc(x, y, currentRadius, 0, Math.PI * 2);
     this.ctx.fill();
 
-    // Draw subtle glow for active zone
+    // Draw subtle glow for active zone (use current radius for heartbeat)
     if (isActive) {
       this.ctx.shadowBlur = 12;
       this.ctx.shadowColor = color;
       this.ctx.beginPath();
-      this.ctx.arc(x, y, 16, 0, Math.PI * 2);
+      this.ctx.arc(x, y, currentRadius, 0, Math.PI * 2);
       this.ctx.fill();
       this.ctx.shadowBlur = 0;
     }
@@ -154,6 +192,84 @@ export class MapRenderer {
     }
     
     this.ctx.globalAlpha = 1.0; // Reset alpha
+  }
+
+  private renderPulseRings(zoneId: string, x: number, y: number, color: string, baseRadius: number) {
+    const pulses = this.zonePulses.get(zoneId);
+    if (!pulses || pulses.length === 0) return;
+
+    const now = Date.now();
+    const maxPulseRadius = baseRadius + 35; // Expand to ~35px beyond base radius
+    const expiredPulses: number[] = [];
+
+    // Parse color hex to RGB
+    const hex = color.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+
+    // Render each active pulse
+    pulses.forEach((pulse, index) => {
+      const age = now - pulse.startTime;
+      const progress = Math.min(age / pulse.duration, 1);
+
+      if (progress >= 1) {
+        // Mark as expired
+        expiredPulses.push(index);
+        return;
+      }
+
+      // Calculate pulse properties with ease-out easing
+      const easedProgress = 1 - Math.pow(1 - progress, 3); // Cubic ease-out
+      const pulseRadius = baseRadius + (maxPulseRadius - baseRadius) * easedProgress;
+      const pulseAlpha = (1 - progress) * 0.6; // Fade from 60% to 0
+
+      // Draw expanding circle
+      this.ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${pulseAlpha})`;
+      this.ctx.lineWidth = 2;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
+      this.ctx.stroke();
+    });
+
+    // Remove expired pulses (in reverse order to maintain indices)
+    expiredPulses.reverse().forEach(index => {
+      pulses.splice(index, 1);
+    });
+
+    // Clean up empty pulse arrays
+    if (pulses.length === 0) {
+      this.zonePulses.delete(zoneId);
+    }
+  }
+
+  private getHeartbeatScale(zoneId: string): number {
+    const heartbeat = this.zoneHeartbeats.get(zoneId);
+    if (!heartbeat) return 1.0;
+
+    const now = Date.now();
+    const age = now - heartbeat.startTime;
+    const progress = Math.min(age / heartbeat.duration, 1);
+
+    if (progress >= 1) {
+      // Heartbeat complete, remove it
+      this.zoneHeartbeats.delete(zoneId);
+      return 1.0;
+    }
+
+    // Heartbeat animation: scale from 1.0 → 1.25 → 1.0
+    // Use a smooth ease-in-out curve
+    const easedProgress = progress < 0.5
+      ? 2 * progress * progress // Ease in
+      : 1 - Math.pow(-2 * progress + 2, 2) / 2; // Ease out
+
+    if (easedProgress < 0.5) {
+      // Growing phase: 1.0 → 1.25
+      return 1.0 + (0.25 * (easedProgress * 2));
+    } else {
+      // Shrinking phase: 1.25 → 1.0
+      return 1.25 - (0.25 * ((easedProgress - 0.5) * 2));
+    }
   }
 
   getNodePosition(nodeId: string): { x: number; y: number } | null {

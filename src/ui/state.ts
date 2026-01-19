@@ -1,6 +1,6 @@
 import type { Event, FileTouchEvent, ToolCallEvent, AgentStateEvent } from '../model/events.js';
 
-export type AgentState = 'reading' | 'writing' | 'executing' | 'thinking' | 'responding';
+export type AgentState = 'reading' | 'writing' | 'executing';
 
 export interface StateTransition {
   from: AgentState;
@@ -13,6 +13,8 @@ export class AgentStateMachine {
   private stateStartTime: number = Date.now();
   private previousNonExecutingState: AgentState | null = null;
   private onStateChange?: (transition: StateTransition) => void;
+  private lastToolCallEndTime: number = 0; // Track when tool calls end
+  private toolCallResultWindow = 2000; // Ignore file_touch events within 2s of tool call end
 
   constructor(onStateChange?: (transition: StateTransition) => void) {
     this.onStateChange = onStateChange;
@@ -38,10 +40,26 @@ export class AgentStateMachine {
 
     if (event.type === 'file_touch') {
       const ft = event as FileTouchEvent;
+      
+      // Ignore file_touch WRITE events that occur during or immediately after tool executions
+      // These are likely results of tool calls (e.g., generated files) and shouldn't
+      // override the tool execution state. Read events are still processed normally.
+      const timeSinceToolCallEnd = Date.now() - this.lastToolCallEndTime;
+      const isInToolResultWindow = timeSinceToolCallEnd < this.toolCallResultWindow;
+      const isCurrentlyExecuting = this.currentState === 'executing';
+      const isWriteEvent = ft.kind === 'write';
+      
+      // Don't transition from 'executing' to 'writing' if we're in the tool result window
+      // This prevents tool-generated files from overriding the tool execution state
+      // But still allow reads to transition (they might be legitimate file reads)
       if (ft.kind === 'read') {
         newState = 'reading';
       } else if (ft.kind === 'write') {
-        newState = 'writing';
+        // Only ignore write events if we're executing and in the tool result window
+        if (!(isCurrentlyExecuting && isInToolResultWindow)) {
+          newState = 'writing';
+        }
+        // Otherwise, ignore this write event (it's likely a tool result)
       }
     } else if (event.type === 'tool_call') {
       const tc = event as ToolCallEvent;
@@ -49,6 +67,8 @@ export class AgentStateMachine {
         // All tool calls transition to executing state
         newState = 'executing';
       } else if (tc.phase === 'end') {
+        // Track when tool call ends
+        this.lastToolCallEndTime = Date.now();
         // Return to previous non-executing state
         newState = this.previousNonExecutingState;
       }

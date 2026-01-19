@@ -5,6 +5,7 @@ export interface BaseEvent {
   ts: number;
   type: EventType;
   session_id: string;
+  id?: string; // Canonical event ID: "source:lineStartOffset"
 }
 
 export interface SessionEvent extends BaseEvent {

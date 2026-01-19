@@ -3,11 +3,13 @@ import type { Event, FileTouchEvent, ToolCallEvent, AgentStateEvent, SessionEven
 export interface LogEntry {
   timestamp: number;
   mode: 'READ' | 'WRITE' | 'EXECUTING' | 'THOUGHT_COMPLETE' | 'RESPONSE_COMPLETE';
-  evidence: string; // File path, command, tool name, etc.
-  age: number; // Seconds since event
+  name: string; // File name or tool name
+  details: string; // Command details, args, etc.
+  age: number; // Seconds since event (computed lazily for visible entries only)
   sessionId: string; // Session ID for boundary detection
   isNew?: boolean; // Flag for flash animation
   isSessionBoundary?: boolean; // Flag for session separator
+  eventKey: string; // Store for seenEvents cleanup (Fix 4)
 }
 
 export class ActivityLog {
@@ -56,7 +58,7 @@ export class ActivityLog {
         }
         .log-entry {
           display: grid;
-          grid-template-columns: 160px 100px 1fr;
+          grid-template-columns: 160px 100px 200px 1fr;
           gap: 12px;
           padding: 6px 12px;
           border-bottom: 1px solid rgba(100, 100, 120, 0.1);
@@ -76,15 +78,45 @@ export class ActivityLog {
           font-weight: 600;
           text-transform: uppercase;
           font-size: 10px;
+          white-space: nowrap;
         }
         .log-mode.READ { color: #3b82f6; }
         .log-mode.WRITE { color: #f59e0b; }
         .log-mode.EXECUTING { color: #8b5cf6; }
         .log-mode.THOUGHT_COMPLETE { color: #a855f7; }
         .log-mode.RESPONSE_COMPLETE { color: #ec4899; }
-        .log-evidence {
+        .log-name {
           color: rgba(200, 200, 220, 0.9);
+          font-size: 11px;
+          word-break: break-word;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .log-details {
+          color: rgba(150, 150, 170, 0.8);
+          font-size: 10px;
           word-break: break-all;
+          font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', monospace;
+        }
+        .log-header {
+          display: grid;
+          grid-template-columns: 160px 100px 200px 1fr;
+          gap: 12px;
+          padding: 6px 12px;
+          border-bottom: 2px solid rgba(100, 100, 120, 0.3);
+          background: rgba(15, 15, 20, 0.95);
+          position: sticky;
+          top: 0;
+          z-index: 10;
+          min-height: 28px;
+          box-sizing: border-box;
+        }
+        .log-header-cell {
+          color: rgba(150, 150, 170, 0.6);
+          font-size: 9px;
+          text-transform: lowercase;
+          font-weight: 600;
+          letter-spacing: 0.5px;
         }
         .log-entry.new-entry {
           animation: flashEntry 1.5s ease-out;
@@ -109,74 +141,82 @@ export class ActivityLog {
   }
 
   addEvent(event: Event, currentMode: string) {
-    // Create unique key for deduplication: ts + type + identifying field
-    const eventKey = this.getEventKey(event);
+    // Use canonical event ID if available, otherwise fall back to generated key
+    const eventKey = event.id || this.getEventKey(event);
     if (this.seenEvents.has(eventKey)) {
+      // Log duplicate detection for debugging
+      if (process.env.NODE_ENV === 'development') {
+        console.warn(`[ActivityLog] Duplicate event detected: ${eventKey} - skipping`);
+      }
       return; // Already seen this event, skip
     }
     this.seenEvents.add(eventKey);
 
     // Determine mode label from event and current state
     let mode: LogEntry['mode'] | null = null;
-    let evidence = '';
+    let name = '';
+    let details = '';
 
     if (event.type === 'file_touch') {
       const ft = event as FileTouchEvent;
       mode = ft.kind === 'read' ? 'READ' : 'WRITE';
-      evidence = ft.path;
+      // Extract just the filename from the path
+      const pathParts = ft.path.split(/[/\\]/);
+      name = pathParts[pathParts.length - 1] || ft.path;
+      // Show directory path as details (if different from filename)
+      const dirPath = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : '';
+      details = dirPath;
     } else if (event.type === 'tool_call') {
       const tc = event as ToolCallEvent;
       const toolName = tc.tool || 'tool';
       const toolLower = toolName.toLowerCase();
       mode = 'EXECUTING';
       
-      // For internet tool calls, show parsed info prominently (URL, query, etc.)
-      // Internet calls don't have end phases, so never show phase label
-      if (toolLower === 'internet' || toolLower.includes('internet') || toolLower.includes('web')) {
-        // Internet tool: show parsed evidence (URL, query, etc.) prominently
-        if (tc.command) {
-          // Command field contains extracted URL/query from extractInternetEvidence
-          evidence = tc.command;
-        } else {
-          // Fallback: just show tool name without phase
-          evidence = toolName;
-        }
-      } else if (toolLower === 'mcp') {
-        // MCP tool: show phase and MCP evidence (server/tool/args) prominently
+      // Show tool name in name column, command/details in details column
+      if (toolLower === 'mcp') {
+        // MCP: show "mcp" as name, (start/end) server:tool (args) as details
+        name = 'mcp';
         const phaseLabel = tc.phase === 'start' ? 'start' : 'end';
         if (tc.command) {
-          // Command field contains extracted MCP details from extractMCPEvidence
-          evidence = `mcp (${phaseLabel}) - ${tc.command}`;
+          details = `(${phaseLabel}) ${tc.command}`;
         } else {
-          // Fallback: just show tool name with phase
-          evidence = `mcp (${phaseLabel})`;
+          details = `(${phaseLabel})`;
         }
+      } else if (toolLower === 'internet' || toolLower.includes('internet') || toolLower.includes('web')) {
+        // Internet: show "internet" as name, URL/query as details
+        name = 'internet';
+        details = tc.command || '';
       } else {
-        // Other tools (terminal, etc.): show tool (phase) - command
+        // Other tools (terminal, etc.): show tool name, command as details
+        name = toolName;
         const phaseLabel = tc.phase === 'start' ? 'start' : 'end';
         if (tc.command) {
-          evidence = `${toolName} (${phaseLabel}) - ${tc.command}`;
+          details = `(${phaseLabel}) ${tc.command}`;
         } else {
-          evidence = `${toolName} (${phaseLabel})`;
+          details = `(${phaseLabel})`;
         }
       }
     } else if (event.type === 'agent_state') {
       const as = event as AgentStateEvent;
       if (as.state === 'thinking') {
         mode = 'THOUGHT_COMPLETE';
-        evidence = 'thought complete';
+        name = 'thought';
+        details = 'complete';
       } else if (as.state === 'responding') {
         mode = 'RESPONSE_COMPLETE';
-        evidence = 'response complete';
+        name = 'response';
+        details = 'complete';
       }
     } else if (event.type === 'session') {
       const se = event as SessionEvent;
       if (se.state === 'start') {
-        mode = 'EXECUTING'; // Session start
-        evidence = 'session started';
+        mode = 'EXECUTING';
+        name = 'session';
+        details = 'started';
       } else if (se.state === 'stop') {
-        mode = 'EXECUTING'; // Session stop
-        evidence = 'session ended';
+        mode = 'EXECUTING';
+        name = 'stop';
+        details = '';
       }
     }
 
@@ -193,11 +233,13 @@ export class ActivityLog {
       const entry: LogEntry = {
         timestamp: event.ts * 1000, // Convert to milliseconds
         mode,
-        evidence,
-        age: 0,
+        name,
+        details,
+        age: 0, // Will be computed lazily for visible entries only
         sessionId: event.session_id,
         isNew: true, // Mark as new for flash animation
         isSessionBoundary: isSessionBoundary,
+        eventKey: eventKey, // Store for seenEvents cleanup
       };
 
       this.entries.push(entry);
@@ -210,19 +252,15 @@ export class ActivityLog {
       // Keep only last N entries (also clean up seenEvents set)
       if (this.entries.length > this.maxEntries) {
         const removed = this.entries.shift();
-        if (removed) {
-          // Note: We can't easily remove from seenEvents without storing keys per entry
-          // But since we're keeping last N, old keys will naturally expire
-          // For safety, periodically clean up if set gets too large
-          if (this.seenEvents.size > this.maxEntries * 2) {
-            // Rebuild seenEvents from current entries
-            this.seenEvents.clear();
-            this.entries.forEach((e, idx) => {
-              // We'd need to store event keys with entries to rebuild properly
-              // For now, just clear and let natural dedup handle it
-            });
-          }
+        if (removed && removed.eventKey) {
+          // Mechanical cleanup: remove key when entry is removed
+          this.seenEvents.delete(removed.eventKey);
         }
+      }
+      
+      // Periodic safety check: if seenEvents gets too large, rebuild from entries
+      if (this.seenEvents.size > this.maxEntries * 1.5) {
+        this.rebuildSeenEvents();
       }
 
       // Schedule render (throttled)
@@ -261,13 +299,8 @@ export class ActivityLog {
   }
 
   private render() {
-    const now = Date.now();
+    const now = Date.now(); // Cache timestamp once per frame
     
-    // Update ages
-    this.entries.forEach(entry => {
-      entry.age = Math.floor((now - entry.timestamp) / 1000);
-    });
-
     // Virtual scrolling: only render visible rows + buffer
     const containerHeight = this.container.clientHeight || 600;
     const rowHeight = 28;
@@ -280,64 +313,109 @@ export class ActivityLog {
     // Render entries (newest first in array, but display oldest at top)
     const sortedEntries = this.entries.slice().reverse();
     
-    // Render only visible entries
+    // Render only visible entries - calculate age ONLY for visible entries
     const visibleEntries = sortedEntries.slice(startIndex, endIndex);
-    const entriesHtml = visibleEntries
-      .map((entry, idx) => {
-        const ageText = entry.age < 1 ? 'now' : entry.age < 60 ? `${entry.age}s` : `${Math.floor(entry.age / 60)}m`;
-        const timeStr = new Date(entry.timestamp).toLocaleTimeString('en-US', { 
-          hour12: false, 
-          hour: '2-digit', 
-          minute: '2-digit', 
-          second: '2-digit' 
-        });
-        
-        // Check if we need a session boundary before this entry
-        // Show boundary OVER (above) session ended/started entries to clearly mark session boundaries
-        const needsBoundary = entry.isSessionBoundary && 
-                              (entry.evidence === 'session ended' || entry.evidence === 'session started');
-        
-        const newClass = entry.isNew ? ' new-entry' : '';
-        
-        return `
-          ${needsBoundary ? '<div class="session-boundary"></div>' : ''}
-          <div class="log-entry${newClass}">
-            <div class="log-timestamp">${timeStr} (${ageText})</div>
-            <div class="log-mode ${entry.mode}">${entry.mode}</div>
-            <div class="log-evidence">${this.escapeHtml(entry.evidence)}</div>
-          </div>
-        `;
-      })
-      .join('');
-
-    // Add spacer divs for virtual scrolling
-    // Account for session boundaries in height calculation (each boundary adds 2px + 8px margin = 10px)
-    let topBoundaryCount = 0;
-    for (let i = 0; i < startIndex; i++) {
-      const entry = sortedEntries[i];
-      const hasBoundary = entry.isSessionBoundary && 
-                          (entry.evidence === 'session ended' || entry.evidence === 'session started');
-      if (hasBoundary) {
-        topBoundaryCount++;
-      }
-    }
-    const topSpacerHeight = startIndex * rowHeight + topBoundaryCount * 10;
-    const topSpacer = startIndex > 0 ? `<div style="height: ${topSpacerHeight}px;"></div>` : '';
     
-    // For bottom spacer, we don't need to count boundaries since they're after the visible area
-    const bottomSpacerHeight = (sortedEntries.length - endIndex) * rowHeight;
-    const bottomSpacer = endIndex < sortedEntries.length ? `<div style="height: ${bottomSpacerHeight}px;"></div>` : '';
+    // Use DocumentFragment for efficient DOM updates
+    const fragment = document.createDocumentFragment();
+    
+    // Create header
+    const header = document.createElement('div');
+    header.className = 'log-header';
+    header.innerHTML = `
+      <div class="log-header-cell">time</div>
+      <div class="log-header-cell">zone</div>
+      <div class="log-header-cell">name</div>
+      <div class="log-header-cell">details</div>
+    `;
+    fragment.appendChild(header);
+    
+    // Add top spacer if needed
+    if (startIndex > 0) {
+      let topBoundaryCount = 0;
+      for (let i = 0; i < startIndex; i++) {
+        const entry = sortedEntries[i];
+        const hasBoundary = entry.isSessionBoundary && 
+                            (entry.name === 'stop' || entry.details === 'started');
+        if (hasBoundary) {
+          topBoundaryCount++;
+        }
+      }
+      const topSpacerHeight = startIndex * rowHeight + topBoundaryCount * 10;
+      const topSpacer = document.createElement('div');
+      topSpacer.style.height = `${topSpacerHeight}px`;
+      fragment.appendChild(topSpacer);
+    }
+    
+    // Create visible entries
+    for (const entry of visibleEntries) {
+      // Calculate age ONLY for visible entries (lazy computation)
+      entry.age = Math.floor((now - entry.timestamp) / 1000);
+      
+      const ageText = entry.age < 1 ? 'now' : entry.age < 60 ? `${entry.age}s` : `${Math.floor(entry.age / 60)}m`;
+      const timeStr = new Date(entry.timestamp).toLocaleTimeString('en-US', { 
+        hour12: false, 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit' 
+      });
+      
+      // Check if we need a session boundary before this entry
+      const needsBoundary = entry.isSessionBoundary && 
+                            (entry.name === 'stop' || entry.details === 'started');
+      
+      if (needsBoundary) {
+        const boundary = document.createElement('div');
+        boundary.className = 'session-boundary';
+        fragment.appendChild(boundary);
+      }
+      
+      const entryDiv = document.createElement('div');
+      entryDiv.className = `log-entry${entry.isNew ? ' new-entry' : ''}`;
+      entryDiv.innerHTML = `
+        <div class="log-timestamp">${timeStr} (${ageText})</div>
+        <div class="log-mode ${entry.mode}">${entry.mode}</div>
+        <div class="log-name">${this.escapeHtml(entry.name)}</div>
+        <div class="log-details">${this.escapeHtml(entry.details)}</div>
+      `;
+      fragment.appendChild(entryDiv);
+    }
+    
+    // Add bottom spacer if needed
+    if (endIndex < sortedEntries.length) {
+      const bottomSpacerHeight = (sortedEntries.length - endIndex) * rowHeight;
+      const bottomSpacer = document.createElement('div');
+      bottomSpacer.style.height = `${bottomSpacerHeight}px`;
+      fragment.appendChild(bottomSpacer);
+    }
 
     // Preserve scroll position
     const oldScrollTop = this.container.scrollTop;
-    this.container.innerHTML = topSpacer + entriesHtml + bottomSpacer;
+    
+    // Replace container content with fragment (more efficient than innerHTML)
+    this.container.innerHTML = '';
+    this.container.appendChild(fragment);
     this.container.scrollTop = oldScrollTop;
+  }
+  
+  private rebuildSeenEvents() {
+    // Rebuild seenEvents from current entries (safety check)
+    this.seenEvents.clear();
+    for (const entry of this.entries) {
+      if (entry.eventKey) {
+        this.seenEvents.add(entry.eventKey);
+      }
+    }
   }
 
   private escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    // Efficient HTML escaping using regex (faster than DOM-based)
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   clear() {

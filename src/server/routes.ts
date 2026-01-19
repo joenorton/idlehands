@@ -1,11 +1,13 @@
 import { IncomingMessage, ServerResponse } from 'http';
 import { parse } from 'url';
-import { readFileSync, existsSync } from 'fs';
+import { existsSync } from 'fs';
+import { readFileSync } from 'fs';
 import { getEventsFilePath } from '../utils/logger.js';
 import { parseEvent, type Event, type FileTouchEvent, type ToolCallEvent, type AgentStateEvent, type UnknownEvent } from '../model/events.js';
 import { appendEvent } from '../utils/logger.js';
-import { broadcastEvent } from './websocket.js';
+import { broadcastEvent, getWebSocketStats } from './websocket.js';
 import { validateEvent } from '../model/validation.js';
+import { getWatcherStats } from './fileWatcher.js';
 import type { Layout } from './layout.js';
 
 export function setupRoutes(
@@ -29,6 +31,11 @@ export function setupRoutes(
 
   if (pathname === '/api/layout' && method === 'GET') {
     handleGetLayout(req, res, layout);
+    return;
+  }
+
+  if (pathname === '/api/stats' && method === 'GET') {
+    handleGetStats(req, res);
     return;
   }
 
@@ -102,13 +109,16 @@ async function handlePostEvent(req: IncomingMessage, res: ServerResponse) {
         console.log(`[${timestamp}] 📦 ${event.type.toUpperCase()}:`, JSON.stringify(event, null, 2));
       }
 
+      // Add temporary debug field to track ingestion path
+      (event as any).ingest_path = 'api';
+      
       // Append to file
       await appendEvent(event);
-      console.log(`[${timestamp}] ✅ Event appended to log`);
+      console.log(`[${timestamp}] ✅ Event appended to log (ingest_path=api, event_id=${event.id || 'none'})`);
       
-      // Broadcast via WebSocket
-      const clientsCount = broadcastEvent(event);
-      console.log(`[${timestamp}] 📡 Broadcast to ${clientsCount} WebSocket client(s)`);
+      // Don't broadcast directly - let file watcher pick it up and broadcast with proper ID
+      // This ensures consistent event IDs and prevents duplicates
+      // The file watcher will read the new line and broadcast it via WebSocket
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
@@ -135,14 +145,45 @@ function handleGetEvents(req: IncomingMessage, res: ServerResponse, parsedUrl: a
   }
 
   try {
-    const content = readFileSync(eventsFile, 'utf-8');
-    const lines = content.trim().split('\n').filter(line => line.trim());
+    // Read file as buffer to track exact byte offsets for event IDs
+    // This ensures IDs match what file watcher would generate
+    const fileBuffer = readFileSync(eventsFile);
     const events: Event[] = [];
-
-    for (const line of lines) {
-      const event = parseEvent(line);
-      if (event) {
-        events.push(event);
+    
+    // Parse file buffer line by line to track exact byte offsets
+    let lineStartOffset = 0;
+    let i = 0;
+    
+    while (i < fileBuffer.length) {
+      // Find next newline
+      let newlineIndex = fileBuffer.indexOf(0x0A, i); // \n
+      if (newlineIndex === -1) {
+        // Last line (no trailing newline)
+        newlineIndex = fileBuffer.length;
+      }
+      
+      // Extract line (including newline for consistency)
+      const lineBuffer = fileBuffer.slice(i, newlineIndex + (newlineIndex < fileBuffer.length ? 1 : 0));
+      const lineText = lineBuffer.toString('utf-8').trim();
+      
+      if (lineText) {
+        const event = parseEvent(lineText);
+        if (event) {
+          // Generate event ID using same format as file watcher: source:lineStartOffset
+          // Only add ID if event doesn't already have one
+          if (!event.id) {
+            event.id = `file_watcher:${lineStartOffset}`;
+          }
+          events.push(event);
+        }
+      }
+      
+      // Move to next line (past newline)
+      lineStartOffset = newlineIndex + 1;
+      i = newlineIndex + 1;
+      
+      if (newlineIndex >= fileBuffer.length) {
+        break;
       }
     }
 
@@ -197,4 +238,42 @@ function handleGetEvents(req: IncomingMessage, res: ServerResponse, parsedUrl: a
 function handleGetLayout(req: IncomingMessage, res: ServerResponse, layout: Layout) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(layout));
+}
+
+async function handleGetStats(req: IncomingMessage, res: ServerResponse) {
+  try {
+    const wsStats = getWebSocketStats();
+    const watcherStats = getWatcherStats();
+    
+    // Get file stats
+    const eventsFile = getEventsFilePath();
+    let fileStats = null;
+    try {
+      const { promises: fs } = await import('fs');
+      const stats = await fs.stat(eventsFile);
+      fileStats = {
+        current_size: stats.size,
+        file_sig: {
+          ino: stats.ino,
+          dev: stats.dev,
+          size: stats.size,
+          birthtimeMs: stats.birthtimeMs
+        }
+      };
+    } catch {
+      // File doesn't exist yet
+    }
+    
+    const stats = {
+      websocket: wsStats,
+      watcher: watcherStats,
+      file: fileStats
+    };
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(stats));
+  } catch (error) {
+    res.writeHead(500);
+    res.end('Error getting stats');
+  }
 }

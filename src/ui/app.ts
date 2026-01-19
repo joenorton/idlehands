@@ -48,6 +48,7 @@ class App {
   private toolCallTimeout = 30000; // 30 seconds timeout for incomplete tool calls
   private isDisconnected = false;
   private isSessionEnded = false; // Track if current session has ended
+  private renderScheduled = false; // One render per animation frame
 
   constructor() {
     this.canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -284,122 +285,165 @@ class App {
     };
 
     this.ws.onmessage = (event) => {
-      let newEvent: Event;
+      let message: any;
       try {
-        newEvent = JSON.parse(event.data) as Event;
+        message = JSON.parse(event.data);
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
         console.error('Raw message:', event.data);
         return; // Ignore malformed messages
       }
       
-      this.state.events.push(newEvent);
+      // Handle batches or single events
+      let eventsToProcess: Event[] = [];
       
-      // Enforce event array size limit to prevent memory issues
-      if (this.state.events.length > MAX_EVENTS_IN_MEMORY) {
-        // Remove oldest events (keep newest)
-        const eventsToRemove = this.state.events.length - MAX_EVENTS_IN_MEMORY;
-        this.state.events = this.state.events.slice(eventsToRemove);
-        console.warn(`[App] Removed ${eventsToRemove} old events to maintain memory limit`);
+      if (message.type === 'batch' && Array.isArray(message.events)) {
+        // Batch message
+        eventsToProcess = message.events;
+      } else {
+        // Single event (backward compatibility)
+        eventsToProcess = [message as Event];
       }
       
-      this.timeline.addEvent(newEvent);
-      
-      // Update stats
-      const now = Date.now();
-      this.state.lastEventTime = newEvent.ts;
-      this.state.eventCount++;
-      this.eventRateWindow.push(now);
-      // Keep only last second of events
-      this.eventRateWindow = this.eventRateWindow.filter(t => now - t < 1000);
-      this.state.eventsPerSecond = this.eventRateWindow.length;
-      this.state.idleSeconds = 0;
-      
-      // Handle tool call lifecycle
-      if (newEvent.type === 'tool_call') {
-        const tc = newEvent as ToolCallEvent;
-        const toolKey = `${tc.tool}:${tc.command || ''}`;
+      // Process all events in batch
+      for (const newEvent of eventsToProcess) {
+        // Handle gap events specially
+        if (newEvent.type === 'unknown' && (newEvent as any).gap_type === 'dropped') {
+          const gap = newEvent as any;
+          console.warn(`[App] Gap detected: ${gap.dropped_count} events dropped`);
+          // Show gap in UI (can be added to activity log as special entry)
+          this.updateStatus(`⚠️ ${gap.dropped_count} events dropped`);
+          // Don't process gap as normal event, but add to events array for visibility
+          this.state.events.push(newEvent);
+          continue;
+        }
         
-        if (tc.phase === 'start') {
-          // Track tool call start
-          this.activeToolCalls.set(toolKey, {
-            startTime: newEvent.ts * 1000,
-            tool: tc.tool,
-            command: tc.command,
-          });
+        this.state.events.push(newEvent);
+      
+        // Enforce event array size limit to prevent memory issues
+        if (this.state.events.length > MAX_EVENTS_IN_MEMORY) {
+          // Remove oldest events (keep newest)
+          const eventsToRemove = this.state.events.length - MAX_EVENTS_IN_MEMORY;
+          this.state.events = this.state.events.slice(eventsToRemove);
+          console.warn(`[App] Removed ${eventsToRemove} old events to maintain memory limit`);
+        }
+        
+        this.timeline.addEvent(newEvent);
+        
+        // Update stats
+        const now = Date.now();
+        this.state.lastEventTime = newEvent.ts;
+        this.state.eventCount++;
+        this.eventRateWindow.push(now);
+        // Keep only last second of events
+        this.eventRateWindow = this.eventRateWindow.filter(t => now - t < 1000);
+        this.state.eventsPerSecond = this.eventRateWindow.length;
+        this.state.idleSeconds = 0;
+        
+        // Handle tool call lifecycle
+        if (newEvent.type === 'tool_call') {
+          const tc = newEvent as ToolCallEvent;
+          const toolKey = `${tc.tool}:${tc.command || ''}`;
           
-          // Clear active file label for tool calls
-          this.agentController.setActiveFile(null);
-          
-          // Set timeout to mark as incomplete if no end event
-          setTimeout(() => {
-            if (this.activeToolCalls.has(toolKey)) {
-              // Tool call is incomplete/hung - mark it but don't keep UI stuck
-              console.warn(`[App] Tool call incomplete after timeout: ${tc.tool}`);
-              this.activeToolCalls.delete(toolKey);
-              // Don't transition state - let it clear naturally
-            }
-          }, this.toolCallTimeout);
-        } else if (tc.phase === 'end') {
-          // Clear tool call tracking
-          this.activeToolCalls.delete(toolKey);
+          if (tc.phase === 'start') {
+            // Track tool call start
+            this.activeToolCalls.set(toolKey, {
+              startTime: newEvent.ts * 1000,
+              tool: tc.tool,
+              command: tc.command,
+            });
+            
+            // Clear active file label for tool calls
+            this.agentController.setActiveFile(null);
+            
+            // Set timeout to mark as incomplete if no end event
+            setTimeout(() => {
+              if (this.activeToolCalls.has(toolKey)) {
+                // Tool call is incomplete/hung - mark it but don't keep UI stuck
+                console.warn(`[App] Tool call incomplete after timeout: ${tc.tool}`);
+                this.activeToolCalls.delete(toolKey);
+                // Don't transition state - let it clear naturally
+              }
+            }, this.toolCallTimeout);
+          } else if (tc.phase === 'end') {
+            // Clear tool call tracking
+            this.activeToolCalls.delete(toolKey);
+          }
         }
-      }
-      
-      // Handle file_touch events - update active file label
-      if (newEvent.type === 'file_touch') {
-        const ft = newEvent as FileTouchEvent;
-        this.agentController.setActiveFile(ft.path);
-      }
-      
-      // Handle session boundaries
-      if (newEvent.type === 'session') {
-        const se = newEvent as SessionEvent;
-        if (se.state === 'stop') {
-          // Mark session as ended
-          this.isSessionEnded = true;
-          // Clear all active tool calls on session stop
-          this.activeToolCalls.clear();
-          // Clear active file label
-          this.agentController.setActiveFile(null);
-          // Move agent to home
-          this.agentController.moveToHome(false);
-          this.mapRenderer.setActiveZone(null);
-        } else if (se.state === 'start') {
-          // Mark session as active when a new session starts
-          this.isSessionEnded = false;
+        
+        // Handle file_touch events - update active file label
+        if (newEvent.type === 'file_touch') {
+          const ft = newEvent as FileTouchEvent;
+          this.agentController.setActiveFile(ft.path);
         }
-      }
-      
-      // Handle agent_state events as ephemeral beacons (don't cause state transitions)
-      if (newEvent.type === 'agent_state') {
-        const as = newEvent as AgentStateEvent;
-        if (as.state === 'thinking' || as.state === 'responding') {
-          // Show ephemeral beacon (emoji bubble) but don't move agent
-          this.agentController.setAgentState(as.state as 'thinking' | 'responding');
+        
+        // Handle session boundaries
+        if (newEvent.type === 'session') {
+          const se = newEvent as SessionEvent;
+          if (se.state === 'stop') {
+            // Mark session as ended
+            this.isSessionEnded = true;
+            // Clear all active tool calls on session stop
+            this.activeToolCalls.clear();
+            // Clear active file label
+            this.agentController.setActiveFile(null);
+            // Move agent to home
+            this.agentController.moveToHome(false);
+            this.mapRenderer.setActiveZone(null);
+          } else if (se.state === 'start') {
+            // Mark session as active when a new session starts
+            this.isSessionEnded = false;
+          }
         }
-      }
-      
-      // Process event through state machine (handles transitions for activity events only)
-      const stateChanged = this.stateMachine.processEvent(newEvent);
-      
-      // Update active zone if state changed (only for activity zones)
-      if (stateChanged) {
+        
+        // Handle agent_state events as ephemeral beacons (don't cause state transitions)
+        if (newEvent.type === 'agent_state') {
+          const as = newEvent as AgentStateEvent;
+          if (as.state === 'thinking' || as.state === 'responding') {
+            // Show ephemeral beacon (emoji bubble) but don't move agent
+            this.agentController.setAgentState(as.state as 'thinking' | 'responding');
+          }
+        }
+        
+        // Process event through state machine (handles transitions for activity events only)
+        const stateChanged = this.stateMachine.processEvent(newEvent);
         const currentState = this.stateMachine.getState();
-        if (currentState) {
-          this.mapRenderer.setActiveZone(`zone:${currentState}`);
+        
+        // Update active zone if state changed (only for activity zones)
+        if (stateChanged) {
+          if (currentState) {
+            this.mapRenderer.setActiveZone(`zone:${currentState}`);
+          }
         }
-      }
 
-      // Add event to activity log (deduplication handled in ActivityLog)
-      const currentState = this.stateMachine.getState();
-      this.activityLog.addEvent(newEvent, currentState || '');
+        // Check if event should trigger pulse on current zone (even if state didn't change)
+        if (!stateChanged && currentState) {
+          const eventZone = this.getZoneForEvent(newEvent);
+          const currentZoneId = `zone:${currentState}`;
+          
+          // If event maps to current zone, trigger pulse
+          if (eventZone === currentZoneId) {
+            this.mapRenderer.triggerZonePulse(currentZoneId);
+          }
+        }
+
+        // Add event to activity log (deduplication handled in ActivityLog)
+        this.activityLog.addEvent(newEvent, currentState || '');
+      }
       
       // Update scope width
       this.state.scopeWidth = this.recentFiles.size;
       
       this.updateStatusPanel();
-      this.render();
+      
+      // Schedule render (only once per animation frame)
+      if (!this.renderScheduled) {
+        this.renderScheduled = true;
+        requestAnimationFrame(() => {
+          this.render();
+          this.renderScheduled = false;
+        });
+      }
     };
 
     this.ws.onerror = () => {
@@ -421,6 +465,26 @@ class App {
   }
 
   // Removed routeEvidence - all evidence now goes to activity log
+
+  // Map event type to zone ID (returns null if event doesn't map to a zone)
+  private getZoneForEvent(event: Event): string | null {
+    if (event.type === 'file_touch') {
+      const ft = event as FileTouchEvent;
+      if (ft.kind === 'read') {
+        return 'zone:reading';
+      } else if (ft.kind === 'write') {
+        return 'zone:writing';
+      }
+    } else if (event.type === 'tool_call') {
+      const tc = event as ToolCallEvent;
+      if (tc.phase === 'start') {
+        return 'zone:executing';
+      }
+      // tool_call 'end' doesn't map to a zone (returns to previous state)
+    }
+    // agent_state, session events don't map to zones
+    return null;
+  }
 
   private updateStatus(message: string) {
     const status = document.getElementById('status')!;
