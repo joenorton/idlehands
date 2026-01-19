@@ -8,6 +8,8 @@ Idlehands makes AI agent behavior observable by showing activity modes, transiti
 
 ## Quick Start
 
+### Setting Up Idlehands
+
 1. **Clone and build**:
    ```bash
    git clone <repo-url>
@@ -16,17 +18,34 @@ Idlehands makes AI agent behavior observable by showing activity modes, transiti
    npm run build
    ```
 
-2. **Install Cursor hooks**:
+2. **Install globally (recommended)**:
    ```bash
-   node dist/cli/index.js install
+   npm install -g .
    ```
    
-   This creates/updates `.cursor/hooks.json` in your repository root.
+   This makes the `idlehands` command available from anywhere.
+
+### Using Idlehands in a Repository
+
+#### Option A: Add to a Different Repository (Most Common)
+
+1. **Navigate to your target repository**:
+   ```bash
+   cd /path/to/your/project
+   ```
+
+2. **Install Cursor hooks**:
+   ```bash
+   idlehands install
+   ```
+   
+   This creates/updates `.cursor/hooks.json` in your repository root. The install command automatically detects the repository root by looking for a `.git` directory.
 
 3. **Restart Cursor** for hooks to take effect.
 
-4. **Start the server**:
+4. **Start the idlehands server** (from the idlehands repository):
    ```bash
+   cd /path/to/idlehands
    npm start
    ```
    
@@ -39,12 +58,42 @@ Idlehands makes AI agent behavior observable by showing activity modes, transiti
    - Connect via WebSocket for real-time events
    - Display the activity log (left) and agent movement between zone anchors (right)
 
+#### Option B: Use in the Idlehands Repository Itself
+
+1. **Install Cursor hooks** (from the idlehands directory):
+   ```bash
+   cd idlehands
+   node dist/cli/index.js install
+   ```
+   
+   Or if installed globally:
+   ```bash
+   idlehands install
+   ```
+
+2. **Restart Cursor** for hooks to take effect.
+
+3. **Start the server**:
+   ```bash
+   npm start
+   ```
+
+4. **Open in your browser**: Navigate to `http://localhost:8765`
+
 ### CLI Commands
 
+**If installed globally:**
+- `idlehands install` - Install Cursor hooks in current repository
+- `idlehands uninstall` - Remove Cursor hooks from current repository
+- `idlehands doctor` - Check system health
+
+**If using from idlehands directory:**
 - `node dist/cli/index.js install` - Install Cursor hooks
 - `node dist/cli/index.js uninstall` - Remove Cursor hooks
 - `node dist/cli/index.js doctor` - Check system health
 - `node dist/cli/log.js` - Generate demo events for testing
+
+**Note:** The `install` command automatically detects the repository root (by looking for `.git`) and installs hooks to `.cursor/hooks.json` in that repository. You can run it from any subdirectory within a git repository.
 
 ## Features
 
