@@ -1,7 +1,6 @@
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'fs';
-import { join } from 'path';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -165,6 +164,13 @@ export function install() {
 
   // Write updated hooks - ensure version is first
   try {
+    // Ensure .cursor directory exists
+    const cursorDir = join(repoRoot, '.cursor');
+    if (!existsSync(cursorDir)) {
+      mkdirSync(cursorDir, { recursive: true });
+      console.log(`Created .cursor directory: ${cursorDir}`);
+    }
+
     const output = {
       version: existingHooks.version || 1,
       hooks: existingHooks.hooks,
