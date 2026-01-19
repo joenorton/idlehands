@@ -17,6 +17,9 @@ interface AppState {
   scopeWidth: number; // Distinct files touched in last N seconds
 }
 
+// Maximum number of events to keep in memory
+const MAX_EVENTS_IN_MEMORY = 50000;
+
 class App {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -291,6 +294,15 @@ class App {
       }
       
       this.state.events.push(newEvent);
+      
+      // Enforce event array size limit to prevent memory issues
+      if (this.state.events.length > MAX_EVENTS_IN_MEMORY) {
+        // Remove oldest events (keep newest)
+        const eventsToRemove = this.state.events.length - MAX_EVENTS_IN_MEMORY;
+        this.state.events = this.state.events.slice(eventsToRemove);
+        console.warn(`[App] Removed ${eventsToRemove} old events to maintain memory limit`);
+      }
+      
       this.timeline.addEvent(newEvent);
       
       // Update stats

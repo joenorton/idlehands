@@ -6,6 +6,9 @@ import { broadcastEvent } from './websocket.js';
 let watchHandle: ReturnType<typeof watch> | null = null;
 let lastPosition = 0;
 let buffer = '';
+let consecutiveErrors = 0;
+const MAX_CONSECUTIVE_ERRORS = 10;
+const ERROR_RETRY_DELAY = 1000; // 1 second
 
 export function startFileWatcher() {
   const eventsFile = getEventsFilePath();
@@ -84,7 +87,52 @@ function readNewEvents() {
         }
       }
     }
+    
+    // Reset error counter on successful read
+    resetErrorCounter();
   } catch (error) {
-    // Ignore errors, file might be locked or deleted
+    consecutiveErrors++;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    
+    // Log error with context
+    console.error(`[${new Date().toISOString()}] ❌ File watcher error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}):`, errorMessage);
+    if (errorStack && consecutiveErrors <= 3) {
+      // Only log stack trace for first few errors to avoid spam
+      console.error(`[${new Date().toISOString()}] Stack:`, errorStack);
+    }
+    
+    // If too many consecutive errors, reset and try to reinitialize
+    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+      console.error(`[${new Date().toISOString()}] ⚠️ Too many consecutive errors, resetting file watcher`);
+      consecutiveErrors = 0;
+      lastPosition = 0;
+      buffer = '';
+      
+      // Try to reinitialize after a delay
+      setTimeout(() => {
+        const eventsFile = getEventsFilePath();
+        if (existsSync(eventsFile)) {
+          try {
+            initializeWatcher();
+            console.log(`[${new Date().toISOString()}] ✅ File watcher reinitialized`);
+          } catch (initError) {
+            console.error(`[${new Date().toISOString()}] ❌ Failed to reinitialize file watcher:`, initError);
+          }
+        }
+      }, ERROR_RETRY_DELAY * 5); // Wait 5 seconds before retry
+    } else {
+      // Reset position on transient errors (file might be locked)
+      // Try again on next change event
+      lastPosition = 0;
+      buffer = '';
+    }
+  }
+}
+
+// Reset error counter on successful read
+function resetErrorCounter() {
+  if (consecutiveErrors > 0) {
+    consecutiveErrors = 0;
   }
 }

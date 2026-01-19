@@ -55,7 +55,7 @@ async function main() {
     
     if (!stdin) {
       appendFileSync(debugLog, `[${new Date().toISOString()}] No stdin, exiting\n`);
-      process.exit(0);
+      process.exit(0); // Exit 0 for no input (not an error condition)
     }
 
     let payload: any;
@@ -65,7 +65,7 @@ async function main() {
     } catch (error) {
       appendFileSync(debugLog, `[${new Date().toISOString()}] JSON parse error: ${error}\n`);
       appendFileSync(debugLog, `[${new Date().toISOString()}] Raw stdin: ${stdin.substring(0, 500)}\n`);
-      process.exit(0);
+      process.exit(1); // Exit with error code for parse failures
     }
 
     const sessionId = getSessionId();
@@ -92,11 +92,13 @@ async function main() {
     process.exit(0);
   } catch (error) {
     // Always log errors
-    appendFileSync(debugLog, `[${new Date().toISOString()}] ERROR: ${error}\n`);
-    if (error instanceof Error) {
-      appendFileSync(debugLog, `[${new Date().toISOString()}] Stack: ${error.stack}\n`);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    appendFileSync(debugLog, `[${new Date().toISOString()}] ERROR: ${errorMessage}\n`);
+    if (errorStack) {
+      appendFileSync(debugLog, `[${new Date().toISOString()}] Stack: ${errorStack}\n`);
     }
-    process.exit(0);
+    process.exit(1); // Exit with error code for failures
   }
 }
 

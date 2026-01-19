@@ -5,6 +5,7 @@ import { getEventsFilePath } from '../utils/logger.js';
 import { parseEvent, type Event, type FileTouchEvent, type ToolCallEvent, type AgentStateEvent, type UnknownEvent } from '../model/events.js';
 import { appendEvent } from '../utils/logger.js';
 import { broadcastEvent } from './websocket.js';
+import { validateEvent } from '../model/validation.js';
 import type { Layout } from './layout.js';
 
 export function setupRoutes(
@@ -54,13 +55,25 @@ async function handlePostEvent(req: IncomingMessage, res: ServerResponse) {
 
   req.on('end', async () => {
     try {
-      const event = JSON.parse(body) as Event;
-      
-      // Validate event structure
-      if (!event.v || !event.ts || !event.type || !event.session_id) {
-        console.error('Invalid event received:', event);
-        res.writeHead(400);
-        res.end('Invalid event');
+      let event: Event;
+      try {
+        event = JSON.parse(body) as Event;
+      } catch (parseError) {
+        console.error('JSON parse error:', parseError);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON', details: parseError instanceof Error ? parseError.message : 'Unknown error' }));
+        return;
+      }
+
+      // Comprehensive event validation
+      const validation = validateEvent(event);
+      if (!validation.valid) {
+        console.error('Invalid event received:', validation.errors);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          error: 'Invalid event', 
+          details: validation.errors.map(e => `${e.field}: ${e.message}`).join('; ')
+        }));
         return;
       }
 
@@ -100,9 +113,14 @@ async function handlePostEvent(req: IncomingMessage, res: ServerResponse) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     } catch (error) {
-      console.error('Error handling event:', error);
-      res.writeHead(400);
-      res.end('Invalid JSON');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      console.error('Error handling event:', errorMessage, errorStack);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        error: 'Internal server error', 
+        details: process.env.NODE_ENV === 'development' ? errorMessage : 'An error occurred processing the event'
+      }));
     }
   });
 }

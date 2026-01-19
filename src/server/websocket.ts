@@ -43,6 +43,8 @@ export function broadcastEvent(event: Event): number {
         sentCount++;
       } catch (error) {
         // Client might have disconnected, remove it
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.warn(`[${new Date().toISOString()}] ⚠️ Failed to send message to WebSocket client: ${errorMessage}`);
         clients.delete(client);
       }
     }
